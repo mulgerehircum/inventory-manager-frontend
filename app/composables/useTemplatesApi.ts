@@ -12,6 +12,8 @@ export interface TemplateElement {
   y: number
   width: number
   height: number
+  // 0-indexed page this element is placed on — see Template.pageCount.
+  page?: number
   fontSize?: number
   content?: string
   fieldPath?: string
@@ -25,6 +27,7 @@ export interface Template {
   name: string
   pageWidth: number
   pageHeight: number
+  pageCount: number
   elements: TemplateElement[]
   compiledTemplate: string
   createdAt: string
@@ -35,12 +38,14 @@ export interface SaveTemplatePayload {
   name: string
   pageWidth?: number
   pageHeight?: number
+  pageCount?: number
   elements: TemplateElement[]
 }
 
 export interface PreviewTemplatePayload {
   pageWidth?: number
   pageHeight?: number
+  pageCount?: number
   elements: TemplateElement[]
 }
 

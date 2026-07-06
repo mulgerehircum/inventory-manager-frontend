@@ -24,22 +24,77 @@ const templateId = ref<string>(isNew ? '' : (route.params.id as string))
 const PAGE_WIDTH = 794
 const PAGE_HEIGHT = 1123
 const CANVAS_GUTTER = 24
+const PAGE_THUMB_WIDTH = 64
+const pageThumbScale = PAGE_THUMB_WIDTH / PAGE_WIDTH
+const PAGE_THUMB_HEIGHT = PAGE_HEIGHT * pageThumbScale
 const PREVIEW_DEBOUNCE_MS = 600
 
 const name = ref('Untitled template')
 const elements = ref<TemplateElement[]>([])
+const pageCount = ref(1)
+const currentPage = ref(0)
+// Only what's on the page being edited is ever shown/interacted with — cross-page elements
+// share the same x/y coordinate space (each page is its own 0..PAGE_WIDTH/HEIGHT box), so
+// mixing them into the canvas or alignment-guide math would be visually wrong.
+const elementsOnCurrentPage = computed(() => elements.value.filter((el) => (el.page ?? 0) === currentPage.value))
+
+// For the page-thumbnail sidebar — a live (read-only) mini render of each page's own
+// content, reusing the same TemplateCanvasElement the main canvas uses, just tiny.
+function elementsForPage(pageIndex: number) {
+  return elements.value.filter((el) => (el.page ?? 0) === pageIndex)
+}
 const selectedId = ref<string | null>(null)
 const isSaving = ref(false)
 const saveError = ref('')
 const loadError = ref('')
 
-const previewBlobUrl = ref('')
+const previewCanvasEl = ref<HTMLCanvasElement | null>(null)
+const hasRenderedPreview = ref(false)
 const previewError = ref('')
 let previewDebounceTimer: ReturnType<typeof setTimeout> | null = null
 // Guards against an older, slower-to-resolve preview request overwriting a newer one.
 let previewRequestId = 0
+const { renderToCanvas: renderPdfToCanvas, destroy: destroyPdfPreview } = usePdfPreview()
+// The last-fetched PDF, kept around so a pure container resize can re-fit the preview
+// without re-hitting the backend for unchanged content. Cached as a Blob, not an
+// ArrayBuffer — pdfjs-dist transfers (detaches) the ArrayBuffer it's given to its worker,
+// so a single ArrayBuffer can only ever be handed to getDocument() once; Blob.arrayBuffer()
+// produces a fresh, non-detached copy on every call.
+let lastPreviewBlob: Blob | null = null
 
-const selectedElement = computed(() => elements.value.find((el) => el.id === selectedId.value) ?? null)
+const previewWrapperEl = ref<HTMLElement | null>(null)
+const previewWrapperSize = reactive({ width: 0, height: 0 })
+let previewResizeObserver: ResizeObserver | null = null
+
+// Fits the preview to its box the same way the editable canvas fits its own (see
+// computeCanvasScale) — the canvas otherwise renders at the PDF's true 1:1 size, which
+// overflows a smaller preview panel instead of shrinking to fit like the old
+// <iframe src="blob:...#view=Fit"> did automatically.
+const previewScale = computed(() =>
+  computeCanvasScale({
+    wrapperWidth: previewWrapperSize.width,
+    wrapperHeight: previewWrapperSize.height,
+    pageWidth: PAGE_WIDTH,
+    pageHeight: PAGE_HEIGHT
+  })
+)
+
+onMounted(() => {
+  if (!previewWrapperEl.value) return
+  previewResizeObserver = new ResizeObserver((entries) => {
+    const entry = entries[0]
+    if (!entry) return
+    previewWrapperSize.width = entry.contentRect.width
+    previewWrapperSize.height = entry.contentRect.height
+  })
+  previewResizeObserver.observe(previewWrapperEl.value)
+})
+
+onBeforeUnmount(() => {
+  previewResizeObserver?.disconnect()
+})
+
+const selectedElement = computed(() => elementsOnCurrentPage.value.find((el) => el.id === selectedId.value) ?? null)
 
 const canvasWrapperEl = ref<HTMLElement | null>(null)
 const wrapperSize = reactive({ width: 0, height: 0 })
@@ -112,24 +167,199 @@ const tooltipStyle = computed(() => {
   return { left: `${left}px`, top: `${top}px` }
 })
 
-// Chrome's built-in PDF viewer defaults to "fit width", which crops the bottom of a tall
-// A4 page. #view=Fit forces "fit whole page" so the entire page is always visible at once.
-const previewViewerUrl = computed(() => (previewBlobUrl.value ? `${previewBlobUrl.value}#view=Fit` : ''))
+// Canva-style smart alignment guides: while dragging/resizing, snap to other elements'
+// edges/centers and show a line at the snapped position. See app/utils/alignmentGuides.ts
+// for the math (unit tested there).
+const SNAP_THRESHOLD_PX = 6
+const activeGuideX = ref<number | null>(null)
+const activeGuideY = ref<number | null>(null)
+
+function otherRects(id: string) {
+  return elementsOnCurrentPage.value
+    .filter((el) => el.id !== id)
+    .map((el) => ({ x: el.x, y: el.y, width: el.width, height: el.height }))
+}
+
+function handleMove(pos: { x: number; y: number }) {
+  if (!selectedElement.value) return
+  const threshold = SNAP_THRESHOLD_PX / canvasScale.value
+  const moving = { x: pos.x, y: pos.y, width: selectedElement.value.width, height: selectedElement.value.height }
+  const { dx, dy, verticalGuideX, horizontalGuideY } = computeMoveSnap(moving, otherRects(selectedElement.value.id), threshold)
+  activeGuideX.value = verticalGuideX
+  activeGuideY.value = horizontalGuideY
+  // Keeps the element's edges within the page on both axes — otherwise a fast drag could
+  // park it partway or fully off the printable canvas.
+  const maxX = Math.max(0, PAGE_WIDTH - moving.width)
+  const maxY = Math.max(0, PAGE_HEIGHT - moving.height)
+  updateSelected({
+    x: Math.min(Math.max(0, pos.x + dx), maxX),
+    y: Math.min(Math.max(0, pos.y + dy), maxY)
+  })
+}
+
+function handleResize(size: { width: number; height: number }) {
+  if (!selectedElement.value) return
+  const threshold = SNAP_THRESHOLD_PX / canvasScale.value
+  const moving = { x: selectedElement.value.x, y: selectedElement.value.y, width: size.width, height: size.height }
+  const { dWidth, dHeight, verticalGuideX, horizontalGuideY } = computeResizeSnap(moving, otherRects(selectedElement.value.id), threshold)
+  activeGuideX.value = verticalGuideX
+  activeGuideY.value = horizontalGuideY
+  // Same bound as handleMove on both axes — resizing grows from the fixed top-left corner,
+  // so cap width/height at whatever room is left before the page's right/bottom edge.
+  const maxWidth = Math.max(20, PAGE_WIDTH - selectedElement.value.x)
+  const maxHeight = Math.max(20, PAGE_HEIGHT - selectedElement.value.y)
+  updateSelected({
+    width: Math.min(Math.max(20, size.width + dWidth), maxWidth),
+    height: Math.min(Math.max(20, size.height + dHeight), maxHeight)
+  })
+}
+
+function clearGuides() {
+  activeGuideX.value = null
+  activeGuideY.value = null
+}
+
+function addPage() {
+  pageCount.value += 1
+  goToPage(pageCount.value - 1)
+}
+
+function goToPage(index: number) {
+  if (index === currentPage.value) return
+  currentPage.value = index
+  // The previous selection (if any) belongs to whatever page we're leaving — its tooltip
+  // would otherwise keep floating over a canvas that no longer shows that element.
+  selectedId.value = null
+  clearGuides()
+}
+
+function removePage(index: number) {
+  if (pageCount.value <= 1) return
+  const elementsOnPage = elements.value.filter((el) => (el.page ?? 0) === index)
+  if (elementsOnPage.length > 0) {
+    const noun = elementsOnPage.length === 1 ? 'element' : 'elements'
+    if (!confirm(`Remove page ${index + 1}? This also deletes its ${elementsOnPage.length} ${noun}.`)) return
+  }
+
+  // Drop this page's elements and shift every later page's elements down by one, keeping
+  // page numbers contiguous (0..pageCount-2) rather than leaving a gap where index used to be.
+  elements.value = elements.value
+    .filter((el) => (el.page ?? 0) !== index)
+    .map((el) => ((el.page ?? 0) > index ? { ...el, page: (el.page ?? 0) - 1 } : el))
+  pageCount.value -= 1
+
+  if (currentPage.value > index) {
+    currentPage.value -= 1
+  } else if (currentPage.value === index) {
+    currentPage.value = Math.min(index, pageCount.value - 1)
+  }
+  selectedId.value = null
+  clearGuides()
+}
+
+function duplicatePage(index: number) {
+  const newPageIndex = index + 1
+  // Make room right after the source page by pushing every later page back by one, then
+  // deep-clone (JSON round-trip, same technique undo/redo uses) the source page's elements
+  // onto that new slot — a shallow spread would leave the clone's table columns/etc sharing
+  // the same nested arrays as the original, so editing one would silently edit both.
+  const shifted = elements.value.map((el) => ((el.page ?? 0) > index ? { ...el, page: (el.page ?? 0) + 1 } : el))
+  const sourceElements = elements.value.filter((el) => (el.page ?? 0) === index)
+  const cloned: TemplateElement[] = JSON.parse(JSON.stringify(sourceElements)).map((el: TemplateElement) => ({
+    ...el,
+    id: makeId(),
+    page: newPageIndex
+  }))
+  elements.value = [...shifted, ...cloned]
+  pageCount.value += 1
+  goToPage(newPageIndex)
+}
+
+// Drag-to-reorder pages, driven from the thumbnail's drag-handle icon. Pointer-based (not
+// native HTML5 drag-and-drop) for consistency with how the canvas's own drag/resize already
+// works elsewhere in this file, and to avoid native DnD's ghost-image/dragover boilerplate.
+const draggingPageIndex = ref<number | null>(null)
+const dragOverPageIndex = ref<number | null>(null)
+
+function onPageHandlePointerDown(index: number, startEvent: PointerEvent) {
+  startEvent.stopPropagation() // don't let this bubble into the thumb's own @click (goToPage)
+  draggingPageIndex.value = index
+  dragOverPageIndex.value = index
+
+  function onMove(moveEvent: PointerEvent) {
+    const target = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY) as HTMLElement | null
+    // data-page-index now lives on .page-row (thumb + its offset action column), not just
+    // the thumb itself, so dragging over either part of a row still tracks correctly.
+    const rowEl = target?.closest('.page-row') as HTMLElement | null
+    if (!rowEl?.dataset.pageIndex) return
+    dragOverPageIndex.value = Number(rowEl.dataset.pageIndex)
+  }
+
+  function onUp() {
+    window.removeEventListener('pointermove', onMove)
+    window.removeEventListener('pointerup', onUp)
+    if (draggingPageIndex.value !== null && dragOverPageIndex.value !== null && dragOverPageIndex.value !== draggingPageIndex.value) {
+      reorderPage(draggingPageIndex.value, dragOverPageIndex.value)
+    }
+    draggingPageIndex.value = null
+    dragOverPageIndex.value = null
+  }
+
+  window.addEventListener('pointermove', onMove)
+  window.addEventListener('pointerup', onUp)
+}
+
+// See app/utils/templateEditorMath.ts for computePageReorderMap (unit tested there).
+function reorderPage(fromIndex: number, toIndex: number) {
+  const map = computePageReorderMap(pageCount.value, fromIndex, toIndex)
+  elements.value = elements.value.map((el) => ({ ...el, page: map[el.page ?? 0] }))
+  currentPage.value = map[currentPage.value]
+  selectedId.value = null
+  clearGuides()
+}
+
+const pagesRailEl = ref<HTMLElement | null>(null)
+
+// The rail itself is the only tab stop (each thumb is tabindex="-1", not independently
+// tabbable) — arrow keys just scroll it by one row rather than moving focus between pages,
+// matching a simple "scrollable list" rather than full roving-tabindex listbox semantics.
+function handleRailKeydown(event: KeyboardEvent) {
+  if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+  event.preventDefault()
+  const rowHeight = PAGE_THUMB_HEIGHT + 10 // thumbnail height + the rail's row gap
+  pagesRailEl.value?.scrollBy({ top: event.key === 'ArrowDown' ? rowHeight : -rowHeight, behavior: 'smooth' })
+}
 
 // The scalar fields available on the report data context (see backend ReportsService.buildReportContext).
 const scalarFieldOptions = ['generatedAt', 'totalValue']
 const productColumnOptions = ['sku', 'name', 'category', 'quantity', 'unitPrice', 'value', 'isLowStock']
 
+async function renderCurrentPreview() {
+  if (!previewCanvasEl.value || !lastPreviewBlob) return
+  const arrayBuffer = await lastPreviewBlob.arrayBuffer()
+  // Renders onto the existing <canvas> in place — unlike an <iframe src="blob:...">,
+  // this doesn't force the browser's native PDF viewer (and its own toolbar UI) to
+  // fully reload on every keystroke-triggered preview update. pdfjs pages are 1-indexed,
+  // so the editor's 0-indexed currentPage needs +1 — this always shows whichever page is
+  // currently being edited, not just the document's first page.
+  await renderPdfToCanvas(previewCanvasEl.value, arrayBuffer, PAGE_WIDTH * previewScale.value, currentPage.value + 1)
+  hasRenderedPreview.value = true
+}
+
 async function refreshPreview() {
   const requestId = ++previewRequestId
   previewError.value = ''
   try {
-    const blob = await previewPdf({ pageWidth: PAGE_WIDTH, pageHeight: PAGE_HEIGHT, elements: elements.value })
+    const blob = await previewPdf({
+      pageWidth: PAGE_WIDTH,
+      pageHeight: PAGE_HEIGHT,
+      pageCount: pageCount.value,
+      elements: elements.value
+    })
     if (requestId !== previewRequestId) return // a newer request already started
 
-    const nextUrl = URL.createObjectURL(blob)
-    if (previewBlobUrl.value) URL.revokeObjectURL(previewBlobUrl.value)
-    previewBlobUrl.value = nextUrl
+    lastPreviewBlob = blob
+    await renderCurrentPreview()
   } catch (err) {
     if (requestId === previewRequestId) previewError.value = 'Could not render the preview.'
   }
@@ -140,11 +370,108 @@ function schedulePreview() {
   previewDebounceTimer = setTimeout(refreshPreview, PREVIEW_DEBOUNCE_MS)
 }
 
+// Re-fits the already-fetched preview when the available space changes (e.g. a window
+// resize) without re-hitting the backend for unchanged content.
+watch(previewScale, () => {
+  renderCurrentPreview().catch(() => {
+    previewError.value = 'Could not render the preview.'
+  })
+})
+
+// Switching pages re-renders the already-fetched PDF at the new page index — the content
+// hasn't changed, just which page is being looked at, so no need to re-hit the backend.
+watch(currentPage, () => {
+  renderCurrentPreview().catch(() => {
+    previewError.value = 'Could not render the preview.'
+  })
+})
+
 watch(elements, schedulePreview, { deep: true })
+// Unlike element edits, adding a page changes the document's actual page structure, so the
+// backend needs to recompile it — refetch immediately rather than debouncing (it's a
+// discrete, infrequent action, not a rapid-fire edit like typing or dragging).
+watch(pageCount, refreshPreview)
 
 onBeforeUnmount(() => {
   if (previewDebounceTimer) clearTimeout(previewDebounceTimer)
-  if (previewBlobUrl.value) URL.revokeObjectURL(previewBlobUrl.value)
+  destroyPdfPreview()
+})
+
+// Undo/redo for the canvas (elements only, not the template name). Snapshot-based: the
+// whole `elements` array is JSON-cloned onto a history stack, debounced the same way the
+// preview is — a burst of changes (typing, a drag, a resize) coalesces into a single undo
+// step once the user pauses, rather than one step per keystroke or per dragged pixel.
+const HISTORY_DEBOUNCE_MS = 500
+const HISTORY_LIMIT = 50
+const history = ref<string[]>([])
+const historyIndex = ref(-1)
+let historyDebounceTimer: ReturnType<typeof setTimeout> | null = null
+// Stops the deep watcher below from recording undo/redo's own restore as a brand-new step.
+let isApplyingHistory = false
+
+const canUndo = computed(() => historyIndex.value > 0)
+const canRedo = computed(() => historyIndex.value < history.value.length - 1)
+
+function commitHistory() {
+  const snapshot = JSON.stringify(elements.value)
+  if (history.value[historyIndex.value] === snapshot) return // nothing actually changed
+  history.value = history.value.slice(0, historyIndex.value + 1) // drop the old redo branch
+  history.value.push(snapshot)
+  if (history.value.length > HISTORY_LIMIT) history.value.shift()
+  historyIndex.value = history.value.length - 1
+}
+
+function scheduleHistoryCommit() {
+  if (isApplyingHistory) return
+  if (historyDebounceTimer) clearTimeout(historyDebounceTimer)
+  historyDebounceTimer = setTimeout(commitHistory, HISTORY_DEBOUNCE_MS)
+}
+
+function applyHistoryAt(index: number) {
+  isApplyingHistory = true
+  historyIndex.value = index
+  const restored = JSON.parse(history.value[index]) as TemplateElement[]
+  elements.value = restored
+  // Keep the current selection if that element still exists at this point in history
+  // (e.g. undoing a move just moves it back); otherwise there's nothing sensible to select.
+  if (!restored.some((el) => el.id === selectedId.value)) selectedId.value = null
+  nextTick(() => {
+    isApplyingHistory = false
+  })
+}
+
+function undo() {
+  if (!canUndo.value) return
+  if (historyDebounceTimer) {
+    clearTimeout(historyDebounceTimer)
+    historyDebounceTimer = null
+  }
+  commitHistory() // flush any pending (not-yet-debounced) edit as its own step before stepping back
+  applyHistoryAt(historyIndex.value - 1)
+}
+
+function redo() {
+  if (!canRedo.value) return
+  applyHistoryAt(historyIndex.value + 1)
+}
+
+function handleUndoRedoKeydown(event: KeyboardEvent) {
+  const target = event.target as HTMLElement | null
+  // Let native undo work inside text inputs/selects rather than hijacking it for canvas history.
+  if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
+  if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'z') return
+  event.preventDefault()
+  if (event.shiftKey) redo()
+  else undo()
+}
+
+onMounted(() => window.addEventListener('keydown', handleUndoRedoKeydown))
+onBeforeUnmount(() => window.removeEventListener('keydown', handleUndoRedoKeydown))
+
+watch(elements, scheduleHistoryCommit, { deep: true })
+
+onBeforeUnmount(() => {
+  if (historyDebounceTimer) clearTimeout(historyDebounceTimer)
 })
 
 // Warns before losing in-progress template edits, whether the user closes/refreshes the tab
@@ -152,11 +479,15 @@ onBeforeUnmount(() => {
 // again after every successful save; anything that changes the current state relative to
 // that baseline counts as "unsaved".
 function snapshotCurrent() {
-  return JSON.stringify({ name: name.value, elements: elements.value })
+  return JSON.stringify({ name: name.value, pageCount: pageCount.value, elements: elements.value })
 }
 
 const lastSavedSnapshot = ref('')
 const isDirty = computed(() => lastSavedSnapshot.value !== '' && snapshotCurrent() !== lastSavedSnapshot.value)
+// Only true once the template actually has a saved copy on the backend (templateId set)
+// AND nothing has changed since — a brand-new, never-saved template must still be savable
+// even with zero edits (e.g. an intentionally empty template), so it's excluded here.
+const hasNoUnsavedChanges = computed(() => !!templateId.value && !isDirty.value)
 
 function handleBeforeUnload(event: BeforeUnloadEvent) {
   if (!isDirty.value) return
@@ -179,34 +510,45 @@ async function loadExisting() {
     const template = await fetchTemplate(templateId.value)
     name.value = template.name
     elements.value = template.elements
-  } catch (err) {
-    loadError.value = 'Could not load this template.'
+    pageCount.value = template.pageCount ?? 1
+    currentPage.value = 0
+  } catch (err: any) {
+    // Templates are private to their creator — surfaces the backend's actual reason
+    // ("Unauthorized" when logged out, "You do not own this template" otherwise) rather
+    // than a generic message, since those are two different, actionable situations.
+    loadError.value = err?.data?.message?.toString() ?? 'Could not load this template.'
   }
 }
 
 onMounted(async () => {
   await loadExisting()
-  // loadExisting() reassigns `elements`, which the deep watcher above also reacts to;
-  // cancel that scheduled duplicate so the initial preview only renders once.
+  // loadExisting() reassigns `elements`, which the deep watchers above also react to;
+  // cancel those scheduled duplicates so the initial preview/history entry aren't doubled.
   if (previewDebounceTimer) clearTimeout(previewDebounceTimer)
+  if (historyDebounceTimer) clearTimeout(historyDebounceTimer)
   refreshPreview()
   // Baseline for dirty-tracking — anything changed after this point (including on a brand
   // new template with zero elements) counts as an unsaved change.
   lastSavedSnapshot.value = snapshotCurrent()
+  // Starting point for undo/redo — "undo" from the very first edit returns here.
+  history.value = [JSON.stringify(elements.value)]
+  historyIndex.value = 0
 })
 
 function makeId() {
   return Math.random().toString(36).slice(2, 10)
 }
 
-// See app/utils/templateEditorMath.ts for computeStagger (unit tested there).
+// See app/utils/templateEditorMath.ts for computeStagger (unit tested there). Counts only
+// the current page's elements so staggering restarts fresh on each new page rather than
+// picking up wherever the last page's count left off.
 function nextStagger() {
-  return computeStagger(elements.value.length)
+  return computeStagger(elementsOnCurrentPage.value.length)
 }
 
 function addElement(type: 'text' | 'field' | 'table') {
   const stagger = nextStagger()
-  const base = { id: makeId(), x: 40 + stagger, y: 40 + stagger, width: 160, height: 24, fontSize: 12 }
+  const base = { id: makeId(), x: 40 + stagger, y: 40 + stagger, width: 160, height: 24, fontSize: 12, page: currentPage.value }
 
   if (type === 'text') {
     elements.value.push({ ...base, type, content: 'Label' })
@@ -219,11 +561,7 @@ function addElement(type: 'text' | 'field' | 'table') {
       width: 320,
       height: 120,
       itemsPath: 'products',
-      columns: [
-        { label: 'SKU', fieldPath: 'sku' },
-        { label: 'Name', fieldPath: 'name' },
-        { label: 'Qty', fieldPath: 'quantity' }
-      ]
+      columns: []
     })
   }
 
@@ -270,6 +608,7 @@ async function handleImageFileSelected(event: Event) {
         y: 40 + stagger,
         width: 160,
         height: 120,
+        page: currentPage.value,
         imageData: dataUri
       })
       selectedId.value = id
@@ -295,12 +634,19 @@ function removeSelected() {
 }
 
 function addColumn() {
-  selectedElement.value?.columns?.push({ label: '', fieldPath: 'sku' })
+  // A non-empty default — the backend's TableColumn schema requires a non-empty label, so a
+  // freshly-added column saved without being touched (e.g. renamed) shouldn't fail to save.
+  selectedElement.value?.columns?.push({ label: 'SKU', fieldPath: 'sku' })
 }
 
 function removeColumn(index: number) {
   selectedElement.value?.columns?.splice(index, 1)
 }
+
+const columnCountLabel = computed(() => {
+  const count = selectedElement.value?.columns?.length ?? 0
+  return count === 1 ? '1 column' : `${count} columns`
+})
 
 async function handleSave() {
   if (!isLoggedIn.value) {
@@ -311,7 +657,13 @@ async function handleSave() {
   isSaving.value = true
   saveError.value = ''
   try {
-    const payload = { name: name.value, pageWidth: PAGE_WIDTH, pageHeight: PAGE_HEIGHT, elements: elements.value }
+    const payload = {
+      name: name.value,
+      pageWidth: PAGE_WIDTH,
+      pageHeight: PAGE_HEIGHT,
+      pageCount: pageCount.value,
+      elements: elements.value
+    }
     if (isNew || !templateId.value) {
       const created = await createTemplate(payload)
       templateId.value = created._id
@@ -336,7 +688,11 @@ async function handleSave() {
     <header class="toolbar card">
       <NuxtLink class="btn btn-secondary" to="/templates">&larr; Templates</NuxtLink>
       <input v-model="name" class="field-input name-input" placeholder="Template name" />
-      <button class="btn btn-primary" :disabled="isSaving" @click="handleSave">{{ isSaving ? 'Saving…' : 'Save' }}</button>
+      <button class="btn btn-secondary" :disabled="!canUndo" title="Undo (Ctrl+Z)" @click="undo">&#8630; Undo</button>
+      <button class="btn btn-secondary" :disabled="!canRedo" title="Redo (Ctrl+Shift+Z)" @click="redo">&#8631; Redo</button>
+      <button class="btn btn-primary" :disabled="isSaving || hasNoUnsavedChanges" @click="handleSave">
+        {{ isSaving ? 'Saving…' : hasNoUnsavedChanges ? 'Saved!' : 'Save' }}
+      </button>
       <span v-if="!isLoggedIn" class="hint-text">Log in (top right) to save — you can still design and preview without an account</span>
       <span v-else-if="!templateId" class="hint-text">Not saved yet — the preview still reflects your current edits</span>
       <button v-if="isLoggedIn" class="btn btn-secondary auth-toolbar-button" @click="handleLogout">Log out</button>
@@ -347,12 +703,154 @@ async function handleSave() {
     <p v-if="loadError" class="error-text">{{ loadError }}</p>
 
     <div class="workspace">
-      <aside class="palette card">
-        <h3>Add element</h3>
-        <button class="btn btn-secondary" @click="addElement('text')">+ Text label</button>
-        <button class="btn btn-secondary" @click="addElement('field')">+ Data field</button>
-        <button class="btn btn-secondary" @click="addElement('table')">+ Table</button>
-        <button class="btn btn-secondary" @click="triggerAddImage">+ Image</button>
+      <aside class="editor-sidebar card">
+        <p class="sidebar-section-title">Pages</p>
+        <div
+          ref="pagesRailEl"
+          class="pages-rail"
+          role="listbox"
+          aria-label="Pages"
+          tabindex="0"
+          @keydown="handleRailKeydown"
+        >
+          <div
+            v-for="pageNumber in pageCount"
+            :key="pageNumber"
+            class="page-row"
+            :class="{
+              dragging: draggingPageIndex === pageNumber - 1,
+              'drag-over': dragOverPageIndex === pageNumber - 1 && draggingPageIndex !== pageNumber - 1
+            }"
+            :data-page-index="pageNumber - 1"
+          >
+            <div
+              class="page-thumb"
+              :class="{ active: pageNumber - 1 === currentPage }"
+              :style="{ width: `${PAGE_THUMB_WIDTH}px`, height: `${PAGE_THUMB_HEIGHT}px` }"
+              role="option"
+              :aria-selected="pageNumber - 1 === currentPage"
+              tabindex="-1"
+              @click="goToPage(pageNumber - 1)"
+            >
+              <div
+                class="page-thumb-canvas"
+                :style="{
+                  width: `${PAGE_WIDTH}px`,
+                  height: `${PAGE_HEIGHT}px`,
+                  transform: `scale(${pageThumbScale})`,
+                  '--thumb-border-width': `${2 / pageThumbScale}px`
+                }"
+              >
+                <TemplateCanvasElement
+                  v-for="el in elementsForPage(pageNumber - 1)"
+                  :key="el.id"
+                  :element="el"
+                  :selected="false"
+                  :scale="pageThumbScale"
+                  :report-context="reportContext"
+                />
+              </div>
+              <span class="page-thumb-number">{{ pageNumber }}</span>
+            </div>
+
+            <div class="page-thumb-actions">
+              <span
+                class="page-thumb-handle"
+                title="Drag to reorder"
+                @pointerdown="onPageHandlePointerDown(pageNumber - 1, $event)"
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true">
+                  <circle cx="4" cy="3" r="1.3" />
+                  <circle cx="10" cy="3" r="1.3" />
+                  <circle cx="4" cy="7" r="1.3" />
+                  <circle cx="10" cy="7" r="1.3" />
+                  <circle cx="4" cy="11" r="1.3" />
+                  <circle cx="10" cy="11" r="1.3" />
+                </svg>
+              </span>
+              <button
+                class="page-thumb-icon-button"
+                aria-label="Duplicate page"
+                title="Duplicate page"
+                @click.stop="duplicatePage(pageNumber - 1)"
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+                  <rect x="1" y="1" width="8" height="8" rx="1.2" />
+                  <rect x="5" y="5" width="8" height="8" rx="1.2" />
+                </svg>
+              </button>
+              <button
+                v-if="pageCount > 1"
+                class="page-thumb-icon-button danger"
+                aria-label="Remove page"
+                title="Remove this page"
+                @click.stop="removePage(pageNumber - 1)"
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+                  <path d="M2 3.5h10" stroke-linecap="round" />
+                  <path d="M5 3.5v-1a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1" />
+                  <path d="M3.2 3.5l0.5 8a1 1 0 0 0 1 0.9h4.6a1 1 0 0 0 1-0.9l0.5-8" />
+                  <path d="M5.5 6v4M8.5 6v4" stroke-linecap="round" />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="page-row">
+            <button
+              class="page-add-button"
+              :style="{ width: `${PAGE_THUMB_WIDTH}px`, height: `${PAGE_THUMB_HEIGHT}px` }"
+              @click="addPage"
+            >
+              <span class="page-add-icon">+</span>
+              <span class="page-add-label">Add page</span>
+            </button>
+            <div class="page-actions-spacer"></div>
+          </div>
+        </div>
+
+        <div class="sidebar-divider"></div>
+
+        <p class="sidebar-section-title">Add element</p>
+
+        <button class="element-button" @click="addElement('text')">
+          <svg class="element-button-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true">
+            <path d="M2 4h12" />
+            <path d="M2 8h12" />
+            <path d="M2 12h7" />
+          </svg>
+          Text label
+          <span class="element-button-plus">+</span>
+        </button>
+        <button class="element-button" @click="triggerAddImage">
+          <svg class="element-button-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+            <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
+            <circle cx="5.2" cy="6" r="1.2" />
+            <path d="M2 12l3.5-4 2.5 3 2-2.5L14 12" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          Image
+          <span class="element-button-plus">+</span>
+        </button>
+
+        <p class="palette-group-label">Data-bound</p>
+
+        <button class="element-button" @click="addElement('field')">
+          <svg class="element-button-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M6 2c-1.5 0-2 .8-2 2v2c0 1-.5 1.5-1.5 1.5.9 0 1.5.5 1.5 1.5v2c0 1.2.5 2 2 2" />
+            <path d="M10 2c1.5 0 2 .8 2 2v2c0 1 .5 1.5 1.5 1.5-.9 0-1.5.5-1.5 1.5v2c0 1.2-.5 2-2 2" />
+          </svg>
+          Data field
+          <span class="element-button-plus">+</span>
+        </button>
+        <button class="element-button" @click="addElement('table')">
+          <svg class="element-button-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+            <rect x="1.5" y="2.5" width="13" height="11" rx="1" />
+            <path d="M1.5 6.5h13M1.5 10.5h13M6 2.5v11M10.5 2.5v11" />
+          </svg>
+          Table
+          <span class="element-button-plus">+</span>
+        </button>
+
         <input
           ref="imageInputEl"
           type="file"
@@ -371,16 +869,20 @@ async function handleSave() {
             @pointerdown="selectedId = null"
           >
             <TemplateCanvasElement
-              v-for="el in elements"
+              v-for="el in elementsOnCurrentPage"
               :key="el.id"
               :element="el"
               :selected="el.id === selectedId"
               :scale="canvasScale"
               :report-context="reportContext"
               @select="selectElement(el.id)"
-              @move="(pos) => updateSelected(pos)"
-              @resize="(size) => updateSelected(size)"
+              @move="handleMove"
+              @resize="handleResize"
+              @autosize="(size) => updateSelected(size)"
+              @interaction-end="clearGuides"
             />
+            <div v-if="activeGuideX !== null" class="guide-line guide-vertical" :style="{ left: `${activeGuideX}px` }"></div>
+            <div v-if="activeGuideY !== null" class="guide-line guide-horizontal" :style="{ top: `${activeGuideY}px` }"></div>
           </div>
 
           <div
@@ -389,63 +891,99 @@ async function handleSave() {
             class="element-tooltip"
             :style="tooltipStyle"
           >
-            <span class="type-badge">{{ selectedElement.type }}</span>
+            <div class="tooltip-header">
+              <span class="type-badge">{{ selectedElement.type }}</span>
+              <button class="tooltip-delete-button" aria-label="Delete element" title="Delete element" @click="removeSelected">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M3 6h18" />
+                  <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                  <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                </svg>
+              </button>
+            </div>
 
-            <template v-if="selectedElement.type === 'text'">
+            <div v-if="selectedElement.type === 'text'" class="field-group">
               <label>Content</label>
               <input
                 :value="selectedElement.content"
                 @input="updateSelected({ content: ($event.target as HTMLInputElement).value })"
               />
-            </template>
+            </div>
 
-            <template v-else-if="selectedElement.type === 'field'">
+            <div v-else-if="selectedElement.type === 'field'" class="field-group">
               <label>Field</label>
-              <select :value="selectedElement.fieldPath" @change="updateSelected({ fieldPath: ($event.target as HTMLSelectElement).value })">
-                <option v-for="opt in scalarFieldOptions" :key="opt" :value="opt">{{ opt }}</option>
-              </select>
-            </template>
+              <AppSelect
+                :model-value="selectedElement.fieldPath ?? ''"
+                :options="scalarFieldOptions"
+                @update:model-value="(v) => updateSelected({ fieldPath: v })"
+              />
+            </div>
 
             <template v-else-if="selectedElement.type === 'table'">
-              <label>Items</label>
-              <input :value="selectedElement.itemsPath" disabled class="items-path" />
-              <label>Columns</label>
-              <div class="columns-inline">
-                <div v-for="(col, index) in selectedElement.columns" :key="index" class="column-row">
-                  <input v-model="col.label" placeholder="Label" class="column-label" />
-                  <select v-model="col.fieldPath">
-                    <option v-for="opt in productColumnOptions" :key="opt" :value="opt">{{ opt }}</option>
-                  </select>
-                  <button class="btn btn-danger btn-sm" @click="removeColumn(index)">x</button>
+              <div class="field-group">
+                <div class="columns-section-header">
+                  <label>Columns</label>
+                  <span class="columns-count">{{ columnCountLabel }}</span>
                 </div>
-                <button class="btn btn-secondary small-button" @click="addColumn">+ Column</button>
+
+                <div v-if="selectedElement.columns?.length" class="columns-list">
+                  <div class="column-row column-row-header">
+                    <span class="column-header-label">Label</span>
+                    <span class="column-header-label">Data key</span>
+                    <span></span>
+                  </div>
+                  <div v-for="(col, index) in selectedElement.columns" :key="index" class="column-row">
+                    <input v-model="col.label" placeholder="Label" class="column-label" />
+                    <AppSelect v-model="col.fieldPath" class="column-datakey-select" :options="productColumnOptions" />
+                    <button class="column-remove-button" aria-label="Remove column" title="Remove column" @click="removeColumn(index)">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M18 6L6 18M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+                <div v-else class="columns-empty">No columns yet</div>
+
+                <button class="add-column-button" @click="addColumn">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true">
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                  Add column
+                </button>
               </div>
             </template>
 
-            <template v-else-if="selectedElement.type === 'image'">
+            <div v-else-if="selectedElement.type === 'image'" class="field-group">
               <img v-if="selectedElement.imageData" :src="selectedElement.imageData" class="image-thumb" alt="" />
               <button class="btn btn-secondary small-button" @click="triggerReplaceImage">Replace image</button>
-            </template>
+            </div>
 
-            <template v-if="selectedElement.type !== 'image'">
-              <label>Size</label>
+            <div v-if="selectedElement.type !== 'image'" class="field-group">
+              <label>Size (px)</label>
               <input
                 type="number"
                 class="font-size-input"
                 :value="selectedElement.fontSize"
                 @input="updateSelected({ fontSize: Number(($event.target as HTMLInputElement).value) })"
               />
-            </template>
+            </div>
 
-            <button class="btn btn-danger small-button" @click="removeSelected">Delete</button>
+            <div class="autosave-line">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M20 6L9 17l-5-5" />
+              </svg>
+              <span>Changes save automatically</span>
+            </div>
           </div>
         </div>
       </div>
 
       <aside class="preview card" :style="{ width: `${PAGE_WIDTH + CANVAS_GUTTER * 2}px` }">
         <p v-if="previewError" class="error-text preview-message">{{ previewError }}</p>
-        <p v-else-if="!previewBlobUrl" class="hint-text preview-message">Add an element to see a PDF preview here.</p>
-        <iframe v-else :src="previewViewerUrl" class="preview-frame"></iframe>
+        <p v-else-if="!hasRenderedPreview" class="hint-text preview-message">Add an element to see a PDF preview here.</p>
+        <div ref="previewWrapperEl" class="preview-canvas-scroll" v-show="!previewError && hasRenderedPreview">
+          <canvas ref="previewCanvasEl" class="preview-canvas"></canvas>
+        </div>
       </aside>
     </div>
   </main>
@@ -476,28 +1014,58 @@ async function handleSave() {
   position: absolute;
   z-index: 50;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  max-width: 360px;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  width: 260px;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-md);
 }
+.tooltip-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.field-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
 .element-tooltip label {
   font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
   color: var(--color-text-muted);
 }
 .type-badge {
+  align-self: flex-start;
   font-size: var(--text-xs);
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  background: var(--color-primary);
-  color: var(--color-primary-contrast);
-  padding: 2px var(--space-2);
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+  padding: 3px var(--space-3);
   border-radius: var(--radius-pill);
+}
+.tooltip-delete-button {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-danger-soft);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-danger);
+  cursor: pointer;
+}
+.tooltip-delete-button:hover {
+  background: var(--color-danger-soft);
 }
 .element-tooltip input,
 .element-tooltip select {
@@ -506,26 +1074,296 @@ async function handleSave() {
   padding: 4px var(--space-2);
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-sm);
+  width: 100%;
+}
+.element-tooltip :deep(.app-select-trigger) {
+  padding: 4px var(--space-2);
 }
 .font-size-input {
-  width: 60px;
+  width: 60px !important;
 }
-.items-path {
-  width: 100px;
-}
-.columns-inline {
+.columns-section-header {
   display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
   align-items: center;
+  justify-content: space-between;
+}
+.columns-count {
+  font-size: var(--text-xs);
+  color: var(--color-text-faint);
+}
+.columns-empty {
+  padding: var(--space-3) var(--space-2);
+  text-align: center;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 11.5px;
+  color: var(--color-text-faint);
+}
+.columns-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
 }
 .column-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr 1fr 20px;
   gap: var(--space-1);
-  align-items: center;
+  align-items: stretch;
 }
-.column-label {
-  width: 90px;
+.column-row-header {
+  padding: 0 var(--space-1);
+}
+.column-header-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-faint);
+}
+.column-datakey-select :deep(.app-select-trigger) {
+  font-family: ui-monospace, Menlo, monospace;
+}
+.column-remove-button {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-faint);
+  cursor: pointer;
+}
+.column-remove-button:hover {
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+}
+.add-column-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: var(--space-1);
+  padding: var(--space-2) 0;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.add-column-button:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+.autosave-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-primary);
+}
+.autosave-line span {
+  font-size: 11.5px;
+  color: var(--color-text-faint);
+}
+.editor-sidebar {
+  /* Pages and Add element used to be two separate floating cards of mismatched height/width
+     — one sidebar with two sections (divided below) reads as one tool instead of two. */
+  width: 220px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+}
+/* Same weight/size for both section headers — Pages picking matters just as much as Add
+   element, so neither should read as the lesser one. */
+.sidebar-section-title {
+  margin: 0 0 var(--space-1);
+  font-weight: 500;
+  font-size: var(--text-lg);
+  color: var(--color-text);
+}
+.sidebar-divider {
+  border-top: 1px solid var(--color-border);
+  margin: var(--space-1) 0 var(--space-2);
+}
+.pages-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 4px;
+  /* Firefox fallback — Firefox has no ::-webkit-scrollbar support, but does support these. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-strong) transparent;
+}
+.pages-rail::-webkit-scrollbar {
+  width: 5px;
+}
+.pages-rail::-webkit-scrollbar-track {
+  background: transparent;
+}
+.pages-rail::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 3px;
+}
+.pages-rail:hover::-webkit-scrollbar-thumb {
+  background: var(--color-text-faint);
+}
+.pages-rail:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.page-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  justify-content: center;
+}
+.page-row.dragging {
+  opacity: 0.4;
+}
+.page-row.dragging .page-thumb-handle {
+  cursor: grabbing;
+}
+.page-thumb {
+  position: relative;
+  flex-shrink: 0;
+  overflow: hidden;
+  background: #fff;
+  /* Width/style stay fixed across every state below (only color/style change) — the
+     thumbnail's own content (.page-thumb-canvas) is absolutely positioned relative to this
+     element's padding box, so changing border-width shifts that content by the difference. */
+  border: 2.5px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.1s ease;
+}
+.page-thumb:hover {
+  border-color: var(--color-border-strong);
+}
+.page-thumb.active {
+  border-color: var(--color-primary);
+}
+/* Drop target while dragging a page — dashed, so it's visibly distinct from the active
+   page's solid border (this can be the same thumb as the active page). Declared after
+   .active so it wins on equal specificity when dragging onto the current page. */
+.page-row.drag-over .page-thumb {
+  border-style: dashed;
+  border-color: var(--color-primary);
+}
+.page-thumb:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+.page-thumb-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: top left;
+  /* Read-only preview — clicks should select the page (via .page-thumb), not drag the
+     elements inside it like the real editable canvas does. */
+  pointer-events: none;
+}
+/* At thumbnail scale the real editable canvas's thin dashed border is invisible, and any
+   text/table content is too small to read anyway — so each element is shown as a solid
+   primary-color block instead, just to indicate where content sits on the page at a glance. */
+.page-thumb-canvas :deep(.canvas-element) {
+  /* border-width is compensated for the thumbnail's scale-down transform (see the inline
+     --thumb-border-width) so it reads as a crisp ~2px line rather than vanishing sub-pixel. */
+  border: var(--thumb-border-width, 2px) solid var(--color-primary);
+  background: rgba(62, 207, 142, 0.25);
+}
+.page-thumb-number {
+  /* Stays the same muted style regardless of active state — the active page is already
+     indicated by the thumbnail's own border color, so the badge doesn't need to double up. */
+  position: absolute;
+  left: var(--space-1);
+  bottom: var(--space-1);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+}
+.page-thumb-actions {
+  /* Offset to the side (not overlaid on the thumbnail) — icons stacked vertically in their
+     own column, revealed on hover/focus of the whole row rather than just the thumbnail. */
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 20px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.page-row:hover .page-thumb-actions,
+.page-row:focus-within .page-thumb-actions {
+  opacity: 1;
+}
+.page-thumb-handle,
+.page-thumb-icon-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--color-border);
+  color: var(--color-text);
+  cursor: pointer;
+}
+.page-thumb-handle {
+  cursor: grab;
+}
+.page-thumb-icon-button:hover {
+  background: var(--color-border-strong);
+}
+.page-thumb-icon-button.danger:hover {
+  background: var(--color-danger);
+  color: #fff;
+}
+.page-add-button {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  background: transparent;
+  border: 1.5px dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  font-family: inherit;
+  cursor: pointer;
+}
+.page-add-label {
+  font-size: 10px;
+}
+.page-add-button:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+.page-add-icon {
+  font-size: 16px;
+  line-height: 1;
+}
+.page-actions-spacer {
+  width: 20px;
+  flex-shrink: 0;
 }
 .workspace {
   display: flex;
@@ -536,16 +1374,48 @@ async function handleSave() {
   max-width: 100%;
   margin: 0 auto;
 }
-.palette {
-  width: 220px;
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-4);
+.palette-group-label {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-faint);
 }
-.palette h3 {
-  margin-bottom: var(--space-1);
+.element-button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: var(--space-2) var(--space-3);
+  background: transparent;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.element-button:hover {
+  border-color: var(--color-primary);
+  /* --color-primary-soft is a solid, fairly rich fill (meant for badges/cards) — much
+     stronger than the barely-there hover cue this needs, so a low-opacity tint of the same
+     primary color is used instead, adapting automatically to either theme's primary hue. */
+  background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+}
+.element-button-icon {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+}
+.element-button-plus {
+  margin-left: auto;
+  font-size: var(--text-md);
+  color: var(--color-text-faint);
+  transition: color 0.12s ease;
+}
+.element-button:hover .element-button-plus {
+  color: var(--color-primary);
 }
 .preview {
   flex-shrink: 0;
@@ -591,15 +1461,45 @@ async function handleSave() {
   top: 0;
   left: 0;
   transform-origin: top left;
+  /* This is a WYSIWYG preview of the PDF page, not app UI — the compiled PDF has no theme
+     and always renders plain black text on white (see template-compiler.ts), so both are
+     hardcoded here rather than following --color-bg/--color-text. */
   background: #fff;
+  color: #000;
   box-shadow: var(--shadow-md);
 }
-.preview-frame {
+.guide-line {
+  /* Fixed magenta rather than --color-primary — it needs to read as a distinct "alignment
+     guide" affordance, not be mistaken for the teal selection outline, against the white
+     WYSIWYG page in either theme. */
+  position: absolute;
+  background: #ff2fb0;
+  pointer-events: none;
+  z-index: 40;
+}
+.guide-vertical {
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+.guide-horizontal {
+  left: 0;
+  right: 0;
+  height: 1px;
+}
+.preview-canvas-scroll {
   width: 100%;
   flex: 1;
   min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
+}
+.preview-canvas {
+  display: block;
 }
 .small-button {
   padding: 4px var(--space-2);

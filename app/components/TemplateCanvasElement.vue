@@ -12,6 +12,11 @@ const emit = defineEmits<{
   select: []
   move: [{ x: number; y: number }]
   resize: [{ width: number; height: number }]
+  // Distinct from `resize` — this is the ResizeObserver-driven auto-fit sizing (text/field
+  // boxes matching their own content), not a user drag, so it must never go through the
+  // parent's alignment-snapping logic.
+  autosize: [{ width: number; height: number }]
+  interactionEnd: []
 }>()
 
 // Shows (and measures) the real resolved value for a field, not the raw {{ fieldPath }}
@@ -23,6 +28,22 @@ function fieldDisplayValue(fieldPath?: string) {
   const value = props.reportContext?.[fieldPath as keyof ReportContext]
   if (value === undefined) return ['{{', fieldPath, '}}'].join(' ')
   return String(value)
+}
+
+// Table rows preview against the same real product data the PDF preview renders (falling
+// back to the raw fieldPath, like fieldDisplayValue, until reportContext has loaded) —
+// previously these showed the literal fieldPath ("sku") while the PDF preview showed real
+// values ("WID-2"), so what you were editing didn't match what you'd get.
+const sampleProducts = computed<Array<Record<string, unknown> | undefined>>(() => {
+  const products = props.reportContext?.products
+  if (!products || products.length === 0) return [undefined, undefined]
+  return [products[0], products[1] ?? products[0]]
+})
+
+function tableCellValue(row: Record<string, unknown> | undefined, fieldPath: string) {
+  if (!row) return fieldPath
+  const value = row[fieldPath]
+  return value === undefined ? fieldPath : String(value)
 }
 
 // Text/field boxes always fit their own content exactly (matching how the PDF renders
@@ -43,7 +64,7 @@ watch(
       const width = el.offsetWidth
       const height = el.offsetHeight
       if (width !== props.element.width || height !== props.element.height) {
-        emit('resize', { width, height })
+        emit('autosize', { width, height })
       }
     })
     bodyResizeObserver.observe(el)
@@ -70,6 +91,7 @@ function onDragStart(startEvent: PointerEvent) {
   function onUp() {
     window.removeEventListener('pointermove', onMove)
     window.removeEventListener('pointerup', onUp)
+    emit('interactionEnd')
   }
 
   window.addEventListener('pointermove', onMove)
@@ -93,6 +115,7 @@ function onResizeStart(startEvent: PointerEvent) {
   function onUp() {
     window.removeEventListener('pointermove', onMove)
     window.removeEventListener('pointerup', onUp)
+    emit('interactionEnd')
   }
 
   window.addEventListener('pointermove', onMove)
@@ -125,8 +148,8 @@ function onResizeStart(startEvent: PointerEvent) {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="n in 2" :key="n">
-              <td v-for="col in element.columns" :key="col.label">{{ col.fieldPath }}</td>
+            <tr v-for="(product, n) in sampleProducts" :key="n">
+              <td v-for="col in element.columns" :key="col.label">{{ tableCellValue(product, col.fieldPath) }}</td>
             </tr>
           </tbody>
         </table>
@@ -162,15 +185,16 @@ function onResizeStart(startEvent: PointerEvent) {
   white-space: nowrap;
 }
 .table-preview {
+  /* Matches the compiled PDF's table styling (template-compiler.ts) — plain black text,
+     #ccc borders — rather than the app's theme, since this previews printed paper. */
   white-space: normal;
   border-collapse: collapse;
   width: 100%;
   font-size: 0.85em;
-  color: var(--color-text-muted);
 }
 .table-preview th,
 .table-preview td {
-  border: 1px solid var(--color-border);
+  border: 1px solid #ccc;
   padding: 2px 4px;
   text-align: left;
 }
@@ -185,11 +209,13 @@ function onResizeStart(startEvent: PointerEvent) {
   pointer-events: none;
 }
 .image-placeholder {
+  /* Editor-only affordance (never appears in the real PDF) but still lives on the white
+     canvas, so it needs a fixed color rather than the app's theme. */
   display: flex;
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: var(--color-text-faint);
+  color: #999;
   font-size: 0.85em;
 }
 .resize-handle {

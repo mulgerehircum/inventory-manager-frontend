@@ -75,3 +75,19 @@ export function computeTooltipPosition({
 export function computeStagger(elementCount: number, stepPx = 24, wrapAfter = 8): number {
   return (elementCount % wrapAfter) * stepPx
 }
+
+// Dragging a page thumbnail from fromIndex to toIndex reshuffles every page in between by
+// one slot. Returns a map where result[oldPageIndex] = newPageIndex, so callers can remap
+// every element's `page` field (and `currentPage`) in one pass without hand-rolling the
+// splice-and-reinsert dance at each call site.
+export function computePageReorderMap(pageCount: number, fromIndex: number, toIndex: number): number[] {
+  const order = Array.from({ length: pageCount }, (_, i) => i)
+  const [moved] = order.splice(fromIndex, 1)
+  order.splice(toIndex, 0, moved)
+
+  const map = new Array(pageCount)
+  order.forEach((oldIndex, newIndex) => {
+    map[oldIndex] = newIndex
+  })
+  return map
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { computeCanvasScale, computeStagger, computeTooltipPosition } from './templateEditorMath'
+import { computeCanvasScale, computePageReorderMap, computeStagger, computeTooltipPosition } from './templateEditorMath'
 
 describe('computeCanvasScale', () => {
   it('returns 1 when the wrapper has not been measured yet', () => {
@@ -93,5 +93,36 @@ describe('computeStagger', () => {
   it('respects custom step/wrap arguments', () => {
     expect(computeStagger(3, 10, 4)).toBe(30)
     expect(computeStagger(4, 10, 4)).toBe(0)
+  })
+})
+
+describe('computePageReorderMap', () => {
+  it('moves a page later, shifting the ones in between back by one', () => {
+    // [0,1,2,3] -> move 0 to position 2 -> [1,2,0,3]
+    const map = computePageReorderMap(4, 0, 2)
+    expect(map).toEqual([2, 0, 1, 3])
+  })
+
+  it('moves a page earlier, shifting the ones in between forward by one', () => {
+    // [0,1,2,3] -> move 3 to position 1 -> [0,3,1,2]
+    const map = computePageReorderMap(4, 3, 1)
+    expect(map).toEqual([0, 2, 3, 1])
+  })
+
+  it('is a no-op when moved to its own position', () => {
+    const map = computePageReorderMap(3, 1, 1)
+    expect(map).toEqual([0, 1, 2])
+  })
+
+  it('handles moving the first page to the last position', () => {
+    // [0,1,2] -> move 0 to position 2 -> [1,2,0]
+    const map = computePageReorderMap(3, 0, 2)
+    expect(map).toEqual([2, 0, 1])
+  })
+
+  it('handles moving the last page to the first position', () => {
+    // [0,1,2] -> move 2 to position 0 -> [2,0,1]
+    const map = computePageReorderMap(3, 2, 0)
+    expect(map).toEqual([1, 2, 0])
   })
 })
