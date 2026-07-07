@@ -64,6 +64,16 @@ function chartLabelValue(row: Record<string, unknown>, field?: string) {
   return value === undefined ? '' : String(value)
 }
 
+// Mirrors the backend's compileBackground (template-compiler.ts) — a two-stop gradient
+// takes over from the plain backgroundColor when both stops are set, so the canvas preview
+// matches what the compiled PDF actually renders.
+function elementBackground(el: TemplateElement) {
+  if (el.gradientFrom && el.gradientTo) {
+    return `linear-gradient(${el.gradientAngle ?? 135}deg, ${el.gradientFrom}, ${el.gradientTo})`
+  }
+  return el.backgroundColor || undefined
+}
+
 // Text/field boxes always fit their own content exactly (matching how the PDF renders
 // them — see template-compiler.ts), so they render at natural size and report that size
 // back to the parent model rather than being manually resizable.
@@ -159,7 +169,7 @@ function onResizeStart(startEvent: PointerEvent) {
       fontStyle: element.italic ? 'italic' : undefined,
       textDecoration: element.underline ? 'underline' : undefined,
       color: element.color || undefined,
-      backgroundColor: element.backgroundColor || undefined,
+      background: elementBackground(element),
       borderRadius: element.borderRadius ? `${element.borderRadius}px` : undefined,
       boxShadow: element.boxShadow || undefined
     }"

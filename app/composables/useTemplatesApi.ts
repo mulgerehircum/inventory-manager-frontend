@@ -41,6 +41,12 @@ export interface TemplateElement {
   underline?: boolean
   color?: string
   backgroundColor?: string
+  // Linear-gradient background — takes over from backgroundColor when both stops are set
+  // (see template-compiler.ts's compileBackground), same either/or relationship as the
+  // page-level pageBackgroundColor/pageGradientFrom below.
+  gradientFrom?: string
+  gradientTo?: string
+  gradientAngle?: number
   borderRadius?: number
   boxShadow?: string
   content?: string
@@ -62,11 +68,19 @@ export interface Template {
   pageWidth: number
   pageHeight: number
   pageBackgroundColor?: string
+  pageGradientFrom?: string
+  pageGradientTo?: string
+  pageGradientAngle?: number
   pageCount: number
   elements: TemplateElement[]
   compiledTemplate: string
   createdAt: string
   updatedAt: string
+  // Public-gallery opt-in and freemium gate — see templates.schema.ts on the backend.
+  // Both default to shared: false / tier: 'free' server-side, so older templates fetched
+  // before these fields existed still behave correctly without needing a migration.
+  shared?: boolean
+  tier?: 'free' | 'premium'
 }
 
 export interface SaveTemplatePayload {
@@ -74,14 +88,22 @@ export interface SaveTemplatePayload {
   pageWidth?: number
   pageHeight?: number
   pageBackgroundColor?: string
+  pageGradientFrom?: string
+  pageGradientTo?: string
+  pageGradientAngle?: number
   pageCount?: number
   elements: TemplateElement[]
+  shared?: boolean
+  tier?: 'free' | 'premium'
 }
 
 export interface PreviewTemplatePayload {
   pageWidth?: number
   pageHeight?: number
   pageBackgroundColor?: string
+  pageGradientFrom?: string
+  pageGradientTo?: string
+  pageGradientAngle?: number
   pageCount?: number
   elements: TemplateElement[]
 }
@@ -120,6 +142,13 @@ export function useTemplatesApi() {
 
   const deleteTemplate = (id: string) => apiFetch(`/templates/${id}`, { method: 'DELETE' })
 
+  // Public gallery — no auth needed to browse, matches the backend's GET /templates/public.
+  const fetchPublicTemplates = () => apiFetch<Template[]>('/templates/public')
+
+  // Clones a shared gallery template into a new template owned by the current user —
+  // requires login (it's a "save"), same as createTemplate.
+  const cloneTemplate = (id: string) => apiFetch<Template>(`/templates/${id}/clone`, { method: 'POST' })
+
   const fetchFontOptions = () => apiFetch<string[]>('/templates/fonts')
 
   // Public backend route (see reports.controller.ts) — opened via plain <a href>, no auth header needed.
@@ -154,6 +183,8 @@ export function useTemplatesApi() {
     createTemplate,
     updateTemplate,
     deleteTemplate,
+    fetchPublicTemplates,
+    cloneTemplate,
     fetchFontOptions,
     customPdfUrl,
     previewPdf,

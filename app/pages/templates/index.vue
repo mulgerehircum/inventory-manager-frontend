@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import type { Template } from '~/composables/useTemplatesApi'
 
-const { fetchTemplates, deleteTemplate, customPdfUrl } = useTemplatesApi()
+const { fetchTemplates, deleteTemplate, customPdfUrl, fetchPublicTemplates, cloneTemplate } = useTemplatesApi()
 const { isLoggedIn } = useAuthApi()
+const router = useRouter()
 
 const templates = ref<Template[]>([])
 const loadError = ref('')
@@ -30,6 +31,47 @@ async function handleDelete(id: string, name: string) {
   if (!confirm(`Delete "${name}"? This can't be undone.`)) return
   await deleteTemplate(id)
   await load()
+}
+
+// The public gallery (GET /templates/public) is browsable regardless of login — separate
+// from the owner-scoped list above, so it loads unconditionally rather than reacting to
+// isLoggedIn like `load()` does.
+const galleryTemplates = ref<Template[]>([])
+const galleryError = ref('')
+const cloningId = ref<string | null>(null)
+const showUpgradeModal = ref(false)
+
+async function loadGallery() {
+  galleryError.value = ''
+  try {
+    galleryTemplates.value = await fetchPublicTemplates()
+  } catch (err) {
+    galleryError.value = 'Could not load the template gallery.'
+  }
+}
+
+onMounted(loadGallery)
+
+// Freemium gate is UI-only for now (see templates.schema.ts's `tier` comment) — a premium
+// template just shows an upgrade prompt instead of actually cloning, no payment involved yet.
+async function handleUseTemplate(template: Template) {
+  if (template.tier === 'premium') {
+    showUpgradeModal.value = true
+    return
+  }
+  if (!isLoggedIn.value) {
+    galleryError.value = 'Log in to start from a gallery template.'
+    return
+  }
+  cloningId.value = template._id
+  try {
+    const cloned = await cloneTemplate(template._id)
+    await router.push(`/templates/${cloned._id}`)
+  } catch (err) {
+    galleryError.value = 'Could not clone this template.'
+  } finally {
+    cloningId.value = null
+  }
 }
 </script>
 
@@ -76,6 +118,40 @@ async function handleDelete(id: string, name: string) {
         </tbody>
       </table>
     </section>
+
+    <div class="header gallery-header">
+      <h2>Gallery</h2>
+    </div>
+    <p v-if="galleryError" class="error-text spaced">{{ galleryError }}</p>
+    <section class="gallery-grid">
+      <div v-for="template in galleryTemplates" :key="template._id" class="card gallery-card">
+        <div class="gallery-card-head">
+          <h3>{{ template.name }}</h3>
+          <span v-if="template.tier === 'premium'" class="badge badge-primary" title="Premium template">&#128274; Premium</span>
+          <span v-else class="badge badge-success">Free</span>
+        </div>
+        <p class="hint-text">{{ template.elements.length }} elements</p>
+        <div class="actions">
+          <a class="btn btn-secondary btn-sm" :href="customPdfUrl(template._id)" target="_blank" rel="noopener">Preview PDF</a>
+          <button class="btn btn-primary btn-sm" :disabled="cloningId === template._id" @click="handleUseTemplate(template)">
+            {{ template.tier === 'premium' ? 'Unlock to use' : 'Use this template' }}
+          </button>
+        </div>
+      </div>
+      <p v-if="!galleryTemplates.length && !galleryError" class="hint-text">No shared templates yet.</p>
+    </section>
+
+    <div v-if="showUpgradeModal" class="modal-overlay" @click.self="showUpgradeModal = false">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>Upgrade to unlock premium templates</h3>
+        </div>
+        <p class="hint-text">
+          Premium templates aren't available on the free plan yet. Billing isn't wired up here — this is just a preview of the gate.
+        </p>
+        <button class="btn btn-primary" @click="showUpgradeModal = false">Got it</button>
+      </div>
+    </div>
 
     <NuxtLink class="btn btn-secondary" to="/">&larr; Back to inventory</NuxtLink>
   </main>
@@ -137,5 +213,36 @@ async function handleDelete(id: string, name: string) {
   display: flex;
   gap: var(--space-4);
   align-items: center;
+}
+.gallery-header {
+  margin-bottom: var(--space-4);
+}
+.gallery-header h2 {
+  font-size: var(--text-xl);
+}
+.gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+.gallery-card {
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.gallery-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.gallery-card-head h3 {
+  font-size: var(--text-lg);
+}
+.gallery-card .actions {
+  gap: var(--space-2);
+  margin-top: auto;
 }
 </style>

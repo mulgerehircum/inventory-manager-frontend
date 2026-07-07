@@ -52,7 +52,38 @@ const PAGE_THUMB_HEIGHT = PAGE_HEIGHT * pageThumbScale
 const PREVIEW_DEBOUNCE_MS = 600
 
 const name = ref('Untitled template')
+// Gallery opt-in + freemium tier — like `name`, these aren't part of canvas undo/redo history,
+// just the save payload and dirty-tracking snapshot.
+const shared = ref(false)
+const tier = ref<'free' | 'premium'>('free')
 const pageBackgroundColor = ref<string | undefined>(undefined)
+const pageGradientFrom = ref<string | undefined>(undefined)
+const pageGradientTo = ref<string | undefined>(undefined)
+const pageGradientAngle = ref<number | undefined>(undefined)
+// Mirrors elementBackground in TemplateCanvasElement.vue / compileBackground on the backend
+// — a gradient takes over from the solid page color when both stops are set.
+const pageBackgroundStyle = computed(() =>
+  pageGradientFrom.value && pageGradientTo.value
+    ? `linear-gradient(${pageGradientAngle.value ?? 135}deg, ${pageGradientFrom.value}, ${pageGradientTo.value})`
+    : pageBackgroundColor.value || undefined
+)
+// Toggling gradient mode on seeds sensible defaults rather than leaving both stops blank
+// (which would just render as if gradient mode were still off); toggling off clears both
+// stops so the plain pageBackgroundColor picker takes over again, matching the same
+// either/or relationship elements have between backgroundColor and gradientFrom/To.
+const pageGradientEnabled = computed({
+  get: () => !!pageGradientFrom.value,
+  set: (enabled: boolean) => {
+    if (enabled) {
+      pageGradientFrom.value ||= '#3ecf8e'
+      pageGradientTo.value ||= '#1f9d6e'
+      pageGradientAngle.value ??= 135
+    } else {
+      pageGradientFrom.value = undefined
+      pageGradientTo.value = undefined
+    }
+  }
+})
 const elements = ref<TemplateElement[]>([])
 const pageCount = ref(1)
 const currentPage = ref(0)
@@ -420,6 +451,9 @@ async function refreshPreview() {
       pageWidth: PAGE_WIDTH,
       pageHeight: PAGE_HEIGHT,
       pageBackgroundColor: pageBackgroundColor.value,
+      pageGradientFrom: pageGradientFrom.value,
+      pageGradientTo: pageGradientTo.value,
+      pageGradientAngle: pageGradientAngle.value,
       pageCount: pageCount.value,
       elements: elements.value
     })
@@ -473,6 +507,9 @@ const HISTORY_LIMIT = 50
 interface HistoryState {
   elements: TemplateElement[]
   pageBackgroundColor?: string
+  pageGradientFrom?: string
+  pageGradientTo?: string
+  pageGradientAngle?: number
 }
 const history = ref<string[]>([])
 const historyIndex = ref(-1)
@@ -484,7 +521,13 @@ const canUndo = computed(() => historyIndex.value > 0)
 const canRedo = computed(() => historyIndex.value < history.value.length - 1)
 
 function currentHistorySnapshot() {
-  return JSON.stringify({ elements: elements.value, pageBackgroundColor: pageBackgroundColor.value } satisfies HistoryState)
+  return JSON.stringify({
+    elements: elements.value,
+    pageBackgroundColor: pageBackgroundColor.value,
+    pageGradientFrom: pageGradientFrom.value,
+    pageGradientTo: pageGradientTo.value,
+    pageGradientAngle: pageGradientAngle.value
+  } satisfies HistoryState)
 }
 
 function commitHistory() {
@@ -508,6 +551,9 @@ function applyHistoryAt(index: number) {
   const restored = JSON.parse(history.value[index]) as HistoryState
   elements.value = restored.elements
   pageBackgroundColor.value = restored.pageBackgroundColor
+  pageGradientFrom.value = restored.pageGradientFrom
+  pageGradientTo.value = restored.pageGradientTo
+  pageGradientAngle.value = restored.pageGradientAngle
   // Keep the current selection if that element still exists at this point in history
   // (e.g. undoing a move just moves it back); otherwise there's nothing sensible to select.
   if (!restored.elements.some((el) => el.id === selectedId.value)) selectedId.value = null
@@ -544,7 +590,7 @@ function handleUndoRedoKeydown(event: KeyboardEvent) {
 onMounted(() => window.addEventListener('keydown', handleUndoRedoKeydown))
 onBeforeUnmount(() => window.removeEventListener('keydown', handleUndoRedoKeydown))
 
-watch([elements, pageBackgroundColor], scheduleHistoryCommit, { deep: true })
+watch([elements, pageBackgroundColor, pageGradientFrom, pageGradientTo, pageGradientAngle], scheduleHistoryCommit, { deep: true })
 
 onBeforeUnmount(() => {
   if (historyDebounceTimer) clearTimeout(historyDebounceTimer)
@@ -555,7 +601,17 @@ onBeforeUnmount(() => {
 // again after every successful save; anything that changes the current state relative to
 // that baseline counts as "unsaved".
 function snapshotCurrent() {
-  return JSON.stringify({ name: name.value, pageBackgroundColor: pageBackgroundColor.value, pageCount: pageCount.value, elements: elements.value })
+  return JSON.stringify({
+    name: name.value,
+    shared: shared.value,
+    tier: tier.value,
+    pageBackgroundColor: pageBackgroundColor.value,
+    pageGradientFrom: pageGradientFrom.value,
+    pageGradientTo: pageGradientTo.value,
+    pageGradientAngle: pageGradientAngle.value,
+    pageCount: pageCount.value,
+    elements: elements.value
+  })
 }
 
 const lastSavedSnapshot = ref('')
@@ -585,9 +641,14 @@ async function loadExisting() {
   try {
     const template = await fetchTemplate(templateId.value)
     name.value = template.name
+    shared.value = template.shared ?? false
+    tier.value = template.tier ?? 'free'
     elements.value = template.elements
     pageCount.value = template.pageCount ?? 1
     pageBackgroundColor.value = template.pageBackgroundColor
+    pageGradientFrom.value = template.pageGradientFrom
+    pageGradientTo.value = template.pageGradientTo
+    pageGradientAngle.value = template.pageGradientAngle
     currentPage.value = 0
   } catch (err: any) {
     // Templates are private to their creator — surfaces the backend's actual reason
@@ -718,6 +779,24 @@ function updateSelected(patch: Partial<TemplateElement>) {
   Object.assign(selectedElement.value, patch)
 }
 
+// Same gradient on/off toggle as pageGradientEnabled above, but scoped to the currently
+// selected element's backgroundColor/gradientFrom-To.
+const elementGradientEnabled = computed({
+  get: () => !!selectedElement.value?.gradientFrom,
+  set: (enabled: boolean) => {
+    if (!selectedElement.value) return
+    if (enabled) {
+      updateSelected({
+        gradientFrom: selectedElement.value.gradientFrom || '#3ecf8e',
+        gradientTo: selectedElement.value.gradientTo || '#1f9d6e',
+        gradientAngle: selectedElement.value.gradientAngle ?? 135
+      })
+    } else {
+      updateSelected({ gradientFrom: undefined, gradientTo: undefined })
+    }
+  }
+})
+
 function removeSelected() {
   if (!selectedId.value) return
   elements.value = elements.value.filter((el) => el.id !== selectedId.value)
@@ -750,9 +829,14 @@ async function handleSave() {
   try {
     const payload = {
       name: name.value,
+      shared: shared.value,
+      tier: tier.value,
       pageWidth: PAGE_WIDTH,
       pageHeight: PAGE_HEIGHT,
       pageBackgroundColor: pageBackgroundColor.value,
+      pageGradientFrom: pageGradientFrom.value,
+      pageGradientTo: pageGradientTo.value,
+      pageGradientAngle: pageGradientAngle.value,
       pageCount: pageCount.value,
       elements: elements.value
     }
@@ -780,12 +864,38 @@ async function handleSave() {
     <header class="toolbar card">
       <NuxtLink class="btn btn-secondary" to="/templates">&larr; Templates</NuxtLink>
       <input v-model="name" class="field-input name-input" placeholder="Template name" />
-      <div class="page-bg-control" title="Page background color (applies to every page)">
+      <div class="page-bg-control" title="Page background (applies to every page)">
         <span class="page-bg-label">Page</span>
-        <AppColorInput :model-value="pageBackgroundColor" placeholder="white" @update:model-value="(v) => (pageBackgroundColor = v)" />
+        <label class="page-bg-gradient-toggle">
+          <input type="checkbox" v-model="pageGradientEnabled" />
+          Gradient
+        </label>
+        <template v-if="pageGradientEnabled">
+          <AppColorInput :model-value="pageGradientFrom" placeholder="from" @update:model-value="(v) => (pageGradientFrom = v)" />
+          <AppColorInput :model-value="pageGradientTo" placeholder="to" @update:model-value="(v) => (pageGradientTo = v)" />
+          <input
+            type="number"
+            class="field-input gradient-angle-input"
+            title="Gradient angle (degrees)"
+            :value="pageGradientAngle ?? 135"
+            @input="pageGradientAngle = Number(($event.target as HTMLInputElement).value)"
+          />
+        </template>
+        <AppColorInput v-else :model-value="pageBackgroundColor" placeholder="white" @update:model-value="(v) => (pageBackgroundColor = v)" />
       </div>
       <button class="btn btn-secondary" :disabled="!canUndo" title="Undo (Ctrl+Z)" @click="undo">&#8630; Undo</button>
       <button class="btn btn-secondary" :disabled="!canRedo" title="Redo (Ctrl+Shift+Z)" @click="redo">&#8631; Redo</button>
+      <label class="page-bg-gradient-toggle" title="List this template in the public gallery for anyone to preview and clone">
+        <input type="checkbox" v-model="shared" />
+        Share in gallery
+      </label>
+      <AppSelect
+        v-if="shared"
+        class="tier-select"
+        :model-value="tier"
+        :options="[{ value: 'free', label: 'Free' }, { value: 'premium', label: 'Premium' }]"
+        @update:model-value="(v) => (tier = v as 'free' | 'premium')"
+      />
       <button class="btn btn-primary" :disabled="isSaving || hasNoUnsavedChanges" @click="handleSave">
         {{ isSaving ? 'Saving…' : hasNoUnsavedChanges ? 'Saved!' : 'Save' }}
       </button>
@@ -835,7 +945,7 @@ async function handleSave() {
                   height: `${PAGE_HEIGHT}px`,
                   transform: `scale(${pageThumbScale})`,
                   '--thumb-border-width': `${2 / pageThumbScale}px`,
-                  backgroundColor: pageBackgroundColor || undefined
+                  background: pageBackgroundStyle
                 }"
               >
                 <TemplateCanvasElement
@@ -981,7 +1091,7 @@ async function handleSave() {
               width: `${PAGE_WIDTH}px`,
               height: `${PAGE_HEIGHT}px`,
               transform: `scale(${canvasScale})`,
-              backgroundColor: pageBackgroundColor || undefined
+              background: pageBackgroundStyle
             }"
             @pointerdown="selectedId = null"
           >
@@ -1281,6 +1391,33 @@ async function handleSave() {
               </div>
               <div class="style-row">
                 <span class="style-row-label">Background</span>
+                <label class="page-bg-gradient-toggle">
+                  <input type="checkbox" v-model="elementGradientEnabled" />
+                  Gradient
+                </label>
+              </div>
+              <div v-if="elementGradientEnabled" class="style-row">
+                <span class="style-row-label"></span>
+                <AppColorInput
+                  :model-value="selectedElement.gradientFrom"
+                  placeholder="from"
+                  @update:model-value="(v) => updateSelected({ gradientFrom: v })"
+                />
+                <AppColorInput
+                  :model-value="selectedElement.gradientTo"
+                  placeholder="to"
+                  @update:model-value="(v) => updateSelected({ gradientTo: v })"
+                />
+                <input
+                  type="number"
+                  class="field-input gradient-angle-input"
+                  title="Gradient angle (degrees)"
+                  :value="selectedElement.gradientAngle ?? 135"
+                  @input="updateSelected({ gradientAngle: Number(($event.target as HTMLInputElement).value) })"
+                />
+              </div>
+              <div v-else class="style-row">
+                <span class="style-row-label"></span>
                 <AppColorInput
                   :model-value="selectedElement.backgroundColor"
                   placeholder="none"
@@ -1368,6 +1505,22 @@ async function handleSave() {
 }
 .page-bg-control .app-color-input {
   width: 140px;
+}
+.page-bg-gradient-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.gradient-angle-input {
+  width: 56px;
+}
+.tier-select {
+  width: 110px;
+  flex-shrink: 0;
 }
 .auth-toolbar-button {
   margin-left: auto;
