@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { ReportContext, ReportFieldSchema, TemplateElement } from '~/composables/useTemplatesApi'
+import type { BackgroundFill, GradientStop, ReportContext, ReportFieldSchema, TemplateElement } from '~/composables/useTemplatesApi'
 
 const route = useRoute()
 const router = useRouter()
@@ -57,33 +57,15 @@ const name = ref('Untitled template')
 const shared = ref(false)
 const tier = ref<'free' | 'premium'>('free')
 const pageBackgroundColor = ref<string | undefined>(undefined)
-const pageGradientFrom = ref<string | undefined>(undefined)
-const pageGradientTo = ref<string | undefined>(undefined)
+const pageBackgroundFill = ref<BackgroundFill | undefined>(undefined)
+const pageGradientStops = ref<GradientStop[] | undefined>(undefined)
 const pageGradientAngle = ref<number | undefined>(undefined)
+const showPageBgPanel = ref(false)
 // Mirrors elementBackground in TemplateCanvasElement.vue / compileBackground on the backend
-// — a gradient takes over from the solid page color when both stops are set.
+// — see app/utils/gradientBackground.ts for the shared fill/stops -> CSS logic.
 const pageBackgroundStyle = computed(() =>
-  pageGradientFrom.value && pageGradientTo.value
-    ? `linear-gradient(${pageGradientAngle.value ?? 135}deg, ${pageGradientFrom.value}, ${pageGradientTo.value})`
-    : pageBackgroundColor.value || undefined
+  computeBackground(pageBackgroundFill.value, pageGradientStops.value, pageGradientAngle.value, pageBackgroundColor.value)
 )
-// Toggling gradient mode on seeds sensible defaults rather than leaving both stops blank
-// (which would just render as if gradient mode were still off); toggling off clears both
-// stops so the plain pageBackgroundColor picker takes over again, matching the same
-// either/or relationship elements have between backgroundColor and gradientFrom/To.
-const pageGradientEnabled = computed({
-  get: () => !!pageGradientFrom.value,
-  set: (enabled: boolean) => {
-    if (enabled) {
-      pageGradientFrom.value ||= '#3ecf8e'
-      pageGradientTo.value ||= '#1f9d6e'
-      pageGradientAngle.value ??= 135
-    } else {
-      pageGradientFrom.value = undefined
-      pageGradientTo.value = undefined
-    }
-  }
-})
 const elements = ref<TemplateElement[]>([])
 const pageCount = ref(1)
 const currentPage = ref(0)
@@ -451,8 +433,8 @@ async function refreshPreview() {
       pageWidth: PAGE_WIDTH,
       pageHeight: PAGE_HEIGHT,
       pageBackgroundColor: pageBackgroundColor.value,
-      pageGradientFrom: pageGradientFrom.value,
-      pageGradientTo: pageGradientTo.value,
+      pageBackgroundFill: pageBackgroundFill.value,
+      pageGradientStops: pageGradientStops.value,
       pageGradientAngle: pageGradientAngle.value,
       pageCount: pageCount.value,
       elements: elements.value
@@ -507,8 +489,8 @@ const HISTORY_LIMIT = 50
 interface HistoryState {
   elements: TemplateElement[]
   pageBackgroundColor?: string
-  pageGradientFrom?: string
-  pageGradientTo?: string
+  pageBackgroundFill?: BackgroundFill
+  pageGradientStops?: GradientStop[]
   pageGradientAngle?: number
 }
 const history = ref<string[]>([])
@@ -524,8 +506,8 @@ function currentHistorySnapshot() {
   return JSON.stringify({
     elements: elements.value,
     pageBackgroundColor: pageBackgroundColor.value,
-    pageGradientFrom: pageGradientFrom.value,
-    pageGradientTo: pageGradientTo.value,
+    pageBackgroundFill: pageBackgroundFill.value,
+    pageGradientStops: pageGradientStops.value,
     pageGradientAngle: pageGradientAngle.value
   } satisfies HistoryState)
 }
@@ -551,8 +533,8 @@ function applyHistoryAt(index: number) {
   const restored = JSON.parse(history.value[index]) as HistoryState
   elements.value = restored.elements
   pageBackgroundColor.value = restored.pageBackgroundColor
-  pageGradientFrom.value = restored.pageGradientFrom
-  pageGradientTo.value = restored.pageGradientTo
+  pageBackgroundFill.value = restored.pageBackgroundFill
+  pageGradientStops.value = restored.pageGradientStops
   pageGradientAngle.value = restored.pageGradientAngle
   // Keep the current selection if that element still exists at this point in history
   // (e.g. undoing a move just moves it back); otherwise there's nothing sensible to select.
@@ -590,7 +572,7 @@ function handleUndoRedoKeydown(event: KeyboardEvent) {
 onMounted(() => window.addEventListener('keydown', handleUndoRedoKeydown))
 onBeforeUnmount(() => window.removeEventListener('keydown', handleUndoRedoKeydown))
 
-watch([elements, pageBackgroundColor, pageGradientFrom, pageGradientTo, pageGradientAngle], scheduleHistoryCommit, { deep: true })
+watch([elements, pageBackgroundColor, pageBackgroundFill, pageGradientStops, pageGradientAngle], scheduleHistoryCommit, { deep: true })
 
 onBeforeUnmount(() => {
   if (historyDebounceTimer) clearTimeout(historyDebounceTimer)
@@ -606,8 +588,8 @@ function snapshotCurrent() {
     shared: shared.value,
     tier: tier.value,
     pageBackgroundColor: pageBackgroundColor.value,
-    pageGradientFrom: pageGradientFrom.value,
-    pageGradientTo: pageGradientTo.value,
+    pageBackgroundFill: pageBackgroundFill.value,
+    pageGradientStops: pageGradientStops.value,
     pageGradientAngle: pageGradientAngle.value,
     pageCount: pageCount.value,
     elements: elements.value
@@ -646,8 +628,8 @@ async function loadExisting() {
     elements.value = template.elements
     pageCount.value = template.pageCount ?? 1
     pageBackgroundColor.value = template.pageBackgroundColor
-    pageGradientFrom.value = template.pageGradientFrom
-    pageGradientTo.value = template.pageGradientTo
+    pageBackgroundFill.value = template.pageBackgroundFill
+    pageGradientStops.value = template.pageGradientStops
     pageGradientAngle.value = template.pageGradientAngle
     currentPage.value = 0
   } catch (err: any) {
@@ -779,24 +761,6 @@ function updateSelected(patch: Partial<TemplateElement>) {
   Object.assign(selectedElement.value, patch)
 }
 
-// Same gradient on/off toggle as pageGradientEnabled above, but scoped to the currently
-// selected element's backgroundColor/gradientFrom-To.
-const elementGradientEnabled = computed({
-  get: () => !!selectedElement.value?.gradientFrom,
-  set: (enabled: boolean) => {
-    if (!selectedElement.value) return
-    if (enabled) {
-      updateSelected({
-        gradientFrom: selectedElement.value.gradientFrom || '#3ecf8e',
-        gradientTo: selectedElement.value.gradientTo || '#1f9d6e',
-        gradientAngle: selectedElement.value.gradientAngle ?? 135
-      })
-    } else {
-      updateSelected({ gradientFrom: undefined, gradientTo: undefined })
-    }
-  }
-})
-
 function removeSelected() {
   if (!selectedId.value) return
   elements.value = elements.value.filter((el) => el.id !== selectedId.value)
@@ -834,8 +798,8 @@ async function handleSave() {
       pageWidth: PAGE_WIDTH,
       pageHeight: PAGE_HEIGHT,
       pageBackgroundColor: pageBackgroundColor.value,
-      pageGradientFrom: pageGradientFrom.value,
-      pageGradientTo: pageGradientTo.value,
+      pageBackgroundFill: pageBackgroundFill.value,
+      pageGradientStops: pageGradientStops.value,
       pageGradientAngle: pageGradientAngle.value,
       pageCount: pageCount.value,
       elements: elements.value
@@ -864,24 +828,27 @@ async function handleSave() {
     <header class="toolbar card">
       <NuxtLink class="btn btn-secondary" to="/templates">&larr; Templates</NuxtLink>
       <input v-model="name" class="field-input name-input" placeholder="Template name" />
-      <div class="page-bg-control" title="Page background (applies to every page)">
-        <span class="page-bg-label">Page</span>
-        <label class="page-bg-gradient-toggle">
-          <input type="checkbox" v-model="pageGradientEnabled" />
-          Gradient
-        </label>
-        <template v-if="pageGradientEnabled">
-          <AppColorInput :model-value="pageGradientFrom" placeholder="from" @update:model-value="(v) => (pageGradientFrom = v)" />
-          <AppColorInput :model-value="pageGradientTo" placeholder="to" @update:model-value="(v) => (pageGradientTo = v)" />
-          <input
-            type="number"
-            class="field-input gradient-angle-input"
-            title="Gradient angle (degrees)"
-            :value="pageGradientAngle ?? 135"
-            @input="pageGradientAngle = Number(($event.target as HTMLInputElement).value)"
+      <div class="page-bg-control">
+        <button class="btn btn-secondary btn-sm" title="Page background (applies to every page)" @click="showPageBgPanel = !showPageBgPanel">
+          Page background
+        </button>
+        <div v-if="showPageBgPanel" class="page-bg-panel card">
+          <div class="page-bg-panel-header">
+            <span class="page-bg-label">Page background</span>
+            <button class="btn-icon-close" title="Close" @click="showPageBgPanel = false">&#10005;</button>
+          </div>
+          <GradientStopEditor
+            :fill="pageBackgroundFill"
+            :stops="pageGradientStops"
+            :angle="pageGradientAngle"
+            :solid-color="pageBackgroundColor"
+            solid-placeholder="white"
+            @update:fill="(v) => (pageBackgroundFill = v)"
+            @update:stops="(v) => (pageGradientStops = v)"
+            @update:angle="(v) => (pageGradientAngle = v)"
+            @update:solidColor="(v) => (pageBackgroundColor = v)"
           />
-        </template>
-        <AppColorInput v-else :model-value="pageBackgroundColor" placeholder="white" @update:model-value="(v) => (pageBackgroundColor = v)" />
+        </div>
       </div>
       <button class="btn btn-secondary" :disabled="!canUndo" title="Undo (Ctrl+Z)" @click="undo">&#8630; Undo</button>
       <button class="btn btn-secondary" :disabled="!canRedo" title="Redo (Ctrl+Shift+Z)" @click="redo">&#8631; Redo</button>
@@ -1389,39 +1356,18 @@ async function handleSave() {
                   @update:model-value="(v) => updateSelected({ color: v })"
                 />
               </div>
-              <div class="style-row">
-                <span class="style-row-label">Background</span>
-                <label class="page-bg-gradient-toggle">
-                  <input type="checkbox" v-model="elementGradientEnabled" />
-                  Gradient
-                </label>
-              </div>
-              <div v-if="elementGradientEnabled" class="style-row">
-                <span class="style-row-label"></span>
-                <AppColorInput
-                  :model-value="selectedElement.gradientFrom"
-                  placeholder="from"
-                  @update:model-value="(v) => updateSelected({ gradientFrom: v })"
-                />
-                <AppColorInput
-                  :model-value="selectedElement.gradientTo"
-                  placeholder="to"
-                  @update:model-value="(v) => updateSelected({ gradientTo: v })"
-                />
-                <input
-                  type="number"
-                  class="field-input gradient-angle-input"
-                  title="Gradient angle (degrees)"
-                  :value="selectedElement.gradientAngle ?? 135"
-                  @input="updateSelected({ gradientAngle: Number(($event.target as HTMLInputElement).value) })"
-                />
-              </div>
-              <div v-else class="style-row">
-                <span class="style-row-label"></span>
-                <AppColorInput
-                  :model-value="selectedElement.backgroundColor"
-                  placeholder="none"
-                  @update:model-value="(v) => updateSelected({ backgroundColor: v })"
+              <div class="field-group">
+                <label>Background</label>
+                <GradientStopEditor
+                  :fill="selectedElement.backgroundFill"
+                  :stops="selectedElement.gradientStops"
+                  :angle="selectedElement.gradientAngle"
+                  :solid-color="selectedElement.backgroundColor"
+                  solid-placeholder="none"
+                  @update:fill="(v) => updateSelected({ backgroundFill: v })"
+                  @update:stops="(v) => updateSelected({ gradientStops: v })"
+                  @update:angle="(v) => updateSelected({ gradientAngle: v })"
+                  @update:solidColor="(v) => updateSelected({ backgroundColor: v })"
                 />
               </div>
               <div class="style-row">
@@ -1501,18 +1447,45 @@ async function handleSave() {
   max-width: 300px;
 }
 .page-bg-control {
+  position: relative;
+  flex-shrink: 0;
+}
+.page-bg-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  width: 240px;
+  padding: var(--space-3);
+  box-shadow: var(--shadow-lg);
+}
+.page-bg-panel-header {
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
+  justify-content: space-between;
+  margin-bottom: var(--space-2);
 }
 .page-bg-label {
   font-size: var(--text-xs);
   color: var(--color-text-muted);
   white-space: nowrap;
 }
-.page-bg-control .app-color-input {
-  width: 140px;
+.btn-icon-close {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: var(--color-text-faint);
+  cursor: pointer;
+  font-size: 11px;
+}
+.btn-icon-close:hover {
+  background: var(--color-bg);
+  color: var(--color-text);
 }
 .page-bg-gradient-toggle {
   display: flex;
@@ -1522,9 +1495,6 @@ async function handleSave() {
   color: var(--color-text-muted);
   white-space: nowrap;
   cursor: pointer;
-}
-.gradient-angle-input {
-  width: 56px;
 }
 .tier-select {
   width: 110px;

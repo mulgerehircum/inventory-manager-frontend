@@ -4,6 +4,23 @@ import { useApiFetch } from './useApiFetch'
 
 export type ElementType = 'text' | 'field' | 'table' | 'image' | 'panel' | 'chart'
 export type TextAlign = 'left' | 'center' | 'right'
+// 'solid' (or unset) uses the plain backgroundColor field; the three gradient fills all use
+// gradientStops/gradientAngle — only which CSS gradient function gets built differs (see
+// TemplateCanvasElement.vue's elementBackground, mirroring the backend's compileBackground).
+export type BackgroundFill = 'solid' | 'linear' | 'radial' | 'conic'
+export const BACKGROUND_FILL_OPTIONS: { value: BackgroundFill; label: string }[] = [
+  { value: 'solid', label: 'Solid' },
+  { value: 'linear', label: 'Linear gradient' },
+  { value: 'radial', label: 'Radial gradient' },
+  { value: 'conic', label: 'Conic gradient' }
+]
+
+export interface GradientStop {
+  color: string
+  // 0-100 — distance along the line (linear), from center (radial), or degrees-as-percent
+  // around the circle (conic).
+  position: number
+}
 
 export interface TableColumn {
   label: string
@@ -41,11 +58,11 @@ export interface TemplateElement {
   underline?: boolean
   color?: string
   backgroundColor?: string
-  // Linear-gradient background — takes over from backgroundColor when both stops are set
-  // (see template-compiler.ts's compileBackground), same either/or relationship as the
-  // page-level pageBackgroundColor/pageGradientFrom below.
-  gradientFrom?: string
-  gradientTo?: string
+  // Gradient background — takes over from backgroundColor whenever fill isn't 'solid' and
+  // at least 2 stops are present, same either/or relationship as the page-level
+  // pageBackgroundColor/pageBackgroundFill below.
+  backgroundFill?: BackgroundFill
+  gradientStops?: GradientStop[]
   gradientAngle?: number
   borderRadius?: number
   boxShadow?: string
@@ -68,8 +85,8 @@ export interface Template {
   pageWidth: number
   pageHeight: number
   pageBackgroundColor?: string
-  pageGradientFrom?: string
-  pageGradientTo?: string
+  pageBackgroundFill?: BackgroundFill
+  pageGradientStops?: GradientStop[]
   pageGradientAngle?: number
   pageCount: number
   elements: TemplateElement[]
@@ -88,8 +105,8 @@ export interface SaveTemplatePayload {
   pageWidth?: number
   pageHeight?: number
   pageBackgroundColor?: string
-  pageGradientFrom?: string
-  pageGradientTo?: string
+  pageBackgroundFill?: BackgroundFill
+  pageGradientStops?: GradientStop[]
   pageGradientAngle?: number
   pageCount?: number
   elements: TemplateElement[]
@@ -101,8 +118,8 @@ export interface PreviewTemplatePayload {
   pageWidth?: number
   pageHeight?: number
   pageBackgroundColor?: string
-  pageGradientFrom?: string
-  pageGradientTo?: string
+  pageBackgroundFill?: BackgroundFill
+  pageGradientStops?: GradientStop[]
   pageGradientAngle?: number
   pageCount?: number
   elements: TemplateElement[]

@@ -64,14 +64,11 @@ function chartLabelValue(row: Record<string, unknown>, field?: string) {
   return value === undefined ? '' : String(value)
 }
 
-// Mirrors the backend's compileBackground (template-compiler.ts) — a two-stop gradient
-// takes over from the plain backgroundColor when both stops are set, so the canvas preview
-// matches what the compiled PDF actually renders.
+// See app/utils/gradientBackground.ts (shared with the page-background preview in
+// templates/[id].vue) for the fill/stops -> CSS background logic, mirroring the backend's
+// compileBackground.
 function elementBackground(el: TemplateElement) {
-  if (el.gradientFrom && el.gradientTo) {
-    return `linear-gradient(${el.gradientAngle ?? 135}deg, ${el.gradientFrom}, ${el.gradientTo})`
-  }
-  return el.backgroundColor || undefined
+  return computeBackground(el.backgroundFill, el.gradientStops, el.gradientAngle, el.backgroundColor)
 }
 
 // Text/field boxes always fit their own content exactly (matching how the PDF renders
