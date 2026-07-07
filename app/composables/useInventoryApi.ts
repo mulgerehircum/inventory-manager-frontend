@@ -1,3 +1,7 @@
+// Explicit import — see the comment in useAuthApi.ts for why this doesn't rely on Nuxt's
+// auto-import for cross-composable calls.
+import { useApiFetch } from './useApiFetch'
+
 export interface Product {
   _id: string
   name: string

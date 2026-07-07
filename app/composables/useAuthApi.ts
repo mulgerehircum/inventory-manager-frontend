@@ -1,3 +1,10 @@
+// Explicit import (not relying on Nuxt's auto-import for this one) — auto-import of a
+// composable calling another composable has been observed to silently break under heavy
+// dev-mode HMR churn in this project (symptom: "useApiFetch is not defined" thrown mid
+// <script setup>, aborting the rest of that setup and cascading into hydration mismatches
+// on whatever page uses this). A static import can't suffer that class of failure.
+import { useApiFetch } from './useApiFetch'
+
 interface AuthResponse {
   accessToken: string
 }
