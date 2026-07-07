@@ -3,8 +3,17 @@ import type { BackgroundFill, GradientStop, ReportContext, ReportFieldSchema, Te
 
 const route = useRoute()
 const router = useRouter()
-const { fetchTemplate, createTemplate, updateTemplate, previewPdf, fetchReportContext, fetchReportFields, fetchFontOptions, uploadImage } =
-  useTemplatesApi()
+const {
+  fetchTemplate,
+  createTemplate,
+  updateTemplate,
+  previewPdf,
+  fetchReportContext,
+  fetchReportFields,
+  fetchFontOptions,
+  uploadImage,
+  fetchSharedTemplateContent
+} = useTemplatesApi()
 const { isLoggedIn, logout } = useAuthApi()
 
 async function handleLogout() {
@@ -622,6 +631,28 @@ onBeforeRouteLeave(() => {
   return confirm('You have unsaved changes to this template. Leave without saving?')
 })
 
+// Pre-fills a brand-new (still unsaved) editor session from a shared gallery template — see
+// templates/index.vue's handleUseTemplate, which routes here with ?from=<id> instead of
+// requiring login just to start editing a free template. Deliberately does NOT set
+// templateId, so hitting Save still goes through createTemplate (a real, auth-gated save),
+// not an update to the source template.
+async function loadFromShared(sourceId: string) {
+  loadError.value = ''
+  try {
+    const content = await fetchSharedTemplateContent(sourceId)
+    name.value = `${content.name} (Copy)`
+    elements.value = content.elements
+    pageCount.value = content.pageCount ?? 1
+    pageBackgroundColor.value = content.pageBackgroundColor
+    pageBackgroundFill.value = content.pageBackgroundFill
+    pageGradientStops.value = content.pageGradientStops
+    pageGradientAngle.value = content.pageGradientAngle
+    currentPage.value = 0
+  } catch (err: any) {
+    loadError.value = err?.data?.message?.toString() ?? 'Could not load this template.'
+  }
+}
+
 async function loadExisting() {
   if (isNew) return
   loadError.value = ''
@@ -646,8 +677,13 @@ async function loadExisting() {
 }
 
 onMounted(async () => {
-  await loadExisting()
-  // loadExisting() reassigns `elements`, which the deep watchers above also react to;
+  const sharedFromId = isNew && typeof route.query.from === 'string' ? route.query.from : null
+  if (sharedFromId) {
+    await loadFromShared(sharedFromId)
+  } else {
+    await loadExisting()
+  }
+  // loadExisting()/loadFromShared() reassign `elements`, which the deep watchers above also react to;
   // cancel those scheduled duplicates so the initial preview/history entry aren't doubled.
   if (previewDebounceTimer) clearTimeout(previewDebounceTimer)
   if (historyDebounceTimer) clearTimeout(historyDebounceTimer)

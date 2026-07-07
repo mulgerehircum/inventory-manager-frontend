@@ -59,8 +59,12 @@ async function handleUseTemplate(template: PublicTemplateSummary) {
     showUpgradeModal.value = true
     return
   }
+  // Not logged in: skip straight to a new, unsaved editor session pre-filled from the shared
+  // template (see templates/[id].vue's handling of the ?from= query param) — no login needed
+  // to *start* editing a free template, same as starting any other new template. Login is
+  // only required once they actually hit Save.
   if (!isLoggedIn.value) {
-    galleryError.value = 'Log in to start from a gallery template.'
+    await router.push(`/templates/new?from=${template._id}`)
     return
   }
   cloningId.value = template._id

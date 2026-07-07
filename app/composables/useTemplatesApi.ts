@@ -92,6 +92,21 @@ export interface PublicTemplateSummary {
   elementCount: number
 }
 
+// What GET /templates/public/:id returns — a shared template's actual editable layout, for
+// pre-filling a new (unsaved) editor session without needing to log in first. Still not
+// compiledTemplate, same reasoning as PublicTemplateSummary above.
+export interface SharedTemplateContent {
+  name: string
+  pageWidth: number
+  pageHeight: number
+  pageBackgroundColor?: string
+  pageBackgroundFill?: BackgroundFill
+  pageGradientStops?: GradientStop[]
+  pageGradientAngle?: number
+  pageCount: number
+  elements: TemplateElement[]
+}
+
 export interface Template {
   _id: string
   name: string
@@ -175,6 +190,11 @@ export function useTemplatesApi() {
   // Public gallery — no auth needed to browse, matches the backend's GET /templates/public.
   const fetchPublicTemplates = () => apiFetch<PublicTemplateSummary[]>('/templates/public')
 
+  // Public + shared-gated (not ownership-checked) — lets an anonymous visitor pre-fill a new
+  // editor session from a free gallery template without logging in first. Saving still goes
+  // through createTemplate, which is auth-gated same as any other new template.
+  const fetchSharedTemplateContent = (id: string) => apiFetch<SharedTemplateContent>(`/templates/public/${id}`)
+
   // Clones a shared gallery template into a new template owned by the current user —
   // requires login (it's a "save"), same as createTemplate.
   const cloneTemplate = (id: string) => apiFetch<Template>(`/templates/${id}/clone`, { method: 'POST' })
@@ -219,6 +239,7 @@ export function useTemplatesApi() {
     updateTemplate,
     deleteTemplate,
     fetchPublicTemplates,
+    fetchSharedTemplateContent,
     cloneTemplate,
     fetchFontOptions,
     customPdfUrl,
