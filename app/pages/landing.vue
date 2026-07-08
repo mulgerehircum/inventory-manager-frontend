@@ -1,9 +1,17 @@
 <script setup lang="ts">
+import type { ReportContext, TemplateElement } from '~/composables/useTemplatesApi'
+
 const { theme, toggleTheme } = useTheme()
 // Matches the theme-specific colors baked into each SVG (see public/pdfloom-logo*.svg) --
 // they're not currentColor-driven, so the right file has to be picked per theme rather than
 // relying on CSS to recolor a single asset.
 const logoSrc = computed(() => (theme.value === 'light' ? '/pdfloom-logo-light.svg' : '/pdfloom-logo.svg'))
+
+// Real curated font names (see google-fonts.ts on the backend) used by the font-cycling
+// mini-editor elements below — loaded once up front rather than per-scroll-tick, same
+// reasoning as templates/[id].vue's usedFontFamilies, just a fixed set since all three are
+// in play across the whole cycle regardless of current scroll position.
+const cyclingFontFamilies = ['Playfair Display', 'JetBrains Mono', 'Space Grotesk']
 
 useHead({
   title: 'PDFloom — PDF Template Designer for Inventory Reports',
@@ -13,7 +21,12 @@ useHead({
       content:
         'PDFloom is a drag-and-drop PDF template editor for inventory reports, invoices, and packing slips. Bind tables to live inventory data, pick your own fonts and colors, and preview the real PDF instantly — no signup required to try.'
     }
-  ]
+  ],
+  link: cyclingFontFamilies.map((name) => ({
+    key: `google-font-${name}`,
+    rel: 'stylesheet',
+    href: `https://fonts.googleapis.com/css2?family=${name.replace(/ /g, '+')}&display=swap`
+  }))
 })
 
 // Element refs (editor section, reveal targets) are set by Vue during the DOM patch, which
@@ -79,41 +92,136 @@ function scrollToStep(idx: number) {
   window.scrollTo({ top: targetScrollY, behavior: prefersReduced ? 'auto' : 'smooth' })
 }
 
+// ---------- Real mini editor ----------
+// Same page-coordinate system as templates/[id].vue (src/reports/reports.service.ts's A4
+// page dimensions), rendered through the actual TemplateCanvasElement component — this mockup
+// shows genuinely how the editor renders these elements, not a hand-drawn approximation.
+const PAGE_WIDTH = 794
+const PAGE_HEIGHT = 1123
+
+// Static stand-in for GET /reports/context — deliberately not fetched from the backend, so
+// the marketing page stays self-contained and never degrades if the API is unreachable. Field
+// names/shape mirror ReportsService.buildReportContext exactly.
+const sampleReportContext: ReportContext = {
+  generatedAt: 'Jul 8, 2026, 9:00 AM',
+  totalValue: '749.37',
+  totalSkus: 3,
+  unitsInStock: 63,
+  needsRestocking: 1,
+  avgUnitPrice: '14.99',
+  products: [
+    { sku: 'WID-2', name: 'Wireless Mouse', category: 'Accessories', quantity: 3, unitPrice: '19.99', value: '59.97', isLowStock: true },
+    { sku: 'CAB-14', name: 'USB-C Cable', category: 'Accessories', quantity: 42, unitPrice: '9.99', value: '419.58', isLowStock: false },
+    { sku: 'ADP-7', name: 'HDMI Adapter', category: 'Accessories', quantity: 18, unitPrice: '14.99', value: '269.82', isLowStock: false }
+  ]
+}
+
+// Mutable so dragging (see onElementMove) actually moves them — a real editor canvas, just
+// pre-seeded instead of loaded from a saved template.
+const miniElements = reactive<TemplateElement[]>([
+  { id: 'title', type: 'text', x: 48, y: 44, width: 300, height: 32, fontSize: 24, bold: true, content: 'Low Stock Report' },
+  { id: 'subtitle', type: 'field', x: 48, y: 84, width: 220, height: 18, fontSize: 12, color: 'var(--color-text-muted)', fieldPath: 'generatedAt' },
+  {
+    id: 'table',
+    type: 'table',
+    x: 48,
+    y: 118,
+    width: 430,
+    height: 90,
+    fontSize: 12,
+    columns: [
+      { label: 'Product', fieldPath: 'name' },
+      { label: 'SKU', fieldPath: 'sku' },
+      { label: 'Qty', fieldPath: 'quantity', align: 'right' },
+      { label: 'Status', fieldPath: 'isLowStock', badge: true, badgeTrueLabel: 'Low', badgeFalseLabel: 'In stock' }
+    ]
+  },
+  { id: 'label', type: 'text', x: 48, y: 236, width: 160, height: 20, fontSize: 13, content: 'Inventory summary' },
+  { id: 'sum-field', type: 'field', x: 48, y: 264, width: 110, height: 22, fontSize: 16, fieldPath: 'totalValue' },
+  { id: 'avg-field', type: 'field', x: 200, y: 264, width: 110, height: 22, fontSize: 16, fieldPath: 'avgUnitPrice' },
+  { id: 'stock-field', type: 'field', x: 352, y: 264, width: 110, height: 22, fontSize: 16, fieldPath: 'needsRestocking' }
+])
+
+// Which pinned-scroll step each element belongs to, for the highlight overlays below —
+// independent of the elements array itself so dragging never disturbs which group a visitor
+// is being shown.
+const zoneElementIds = [
+  ['title', 'subtitle'],
+  ['table'],
+  ['label', 'sum-field', 'avg-field', 'stock-field']
+]
+// Only the 3 real-element groups get a highlight rect — the "pages" step (index 3) has no
+// canvas elements of its own; it highlights the separate mini-pages-thumbs overlay instead.
+const zoneHighlightRects = [
+  { x: 32, y: 28, width: 380, height: 78 },
+  { x: 32, y: 108, width: 460, height: 112 },
+  { x: 32, y: 226, width: 460, height: 74 }
+]
+
+function zoneOfElement(id: string): number {
+  return zoneElementIds.findIndex((ids) => ids.includes(id))
+}
+
+function onElementMove(id: string, pos: { x: number; y: number }) {
+  const el = miniElements.find((e) => e.id === id)
+  if (!el) return
+  el.x = Math.max(0, Math.min(PAGE_WIDTH - el.width, pos.x))
+  el.y = Math.max(0, Math.min(PAGE_HEIGHT - el.height, pos.y))
+}
+
 // ---------- Gradient background, driven by the pinned section's overall scroll progress ----------
 // One preset per editor step (same 4-way granularity as the rest of the mockup) rather than a
 // continuously-interpolated gradient — CSS can't smoothly tween between two arbitrary gradients,
 // so snapping in step with everything else it already snaps with (nav/toolbar/zone) reads as
 // intentional instead of janky. Stays within the app's own background/soft tones (never a
-// saturated hue) so zone text sitting on top never loses contrast.
+// saturated hue) so element text sitting on top never loses contrast.
 const pageGradients = [
   'linear-gradient(135deg, var(--color-bg) 0%, var(--color-bg) 100%)',
   'linear-gradient(135deg, var(--color-bg) 30%, var(--color-primary-soft) 100%)',
   'linear-gradient(50deg, var(--color-primary-soft) 0%, var(--color-bg) 55%, var(--color-primary-soft) 100%)',
   'linear-gradient(200deg, var(--color-bg) 0%, var(--color-surface) 60%, var(--color-bg) 100%)'
 ]
-const editorPageStyle = computed(() => ({ background: pageGradients[editorStep.value] }))
 
 // ---------- Font-cycling fields ----------
-// Several small "elements" that each cycle through the same font presets as scroll advances,
-// phase-shifted per field so they cascade instead of flipping in lockstep — demonstrates
-// per-element font choice more vividly than one line a visitor has to click to see change.
-const fonts = [
-  { family: 'Georgia, serif', color: 'var(--color-text)', fontStyle: 'normal', decoration: 'none' },
-  { family: "'Courier New', monospace", color: 'var(--color-primary)', fontStyle: 'normal', decoration: 'none' },
-  { family: 'var(--font-sans)', color: 'var(--color-danger)', fontStyle: 'italic', decoration: 'underline' }
+// The label/summary field elements each cycle through the same three real font presets as
+// scroll advances, phase-shifted per element so they cascade instead of flipping in lockstep —
+// demonstrates per-element font choice more vividly than a single line ever showed, and now
+// through the real component instead of a lookalike.
+const fontStates = [
+  { fontFamily: 'Playfair Display', color: 'var(--color-text)', italic: false, underline: false },
+  { fontFamily: 'JetBrains Mono', color: 'var(--color-primary)', italic: false, underline: false },
+  { fontFamily: 'Space Grotesk', color: 'var(--color-danger)', italic: true, underline: true }
 ]
-const fontFields = ['Product', 'SKU-1042', '$24.99', '8 in stock']
+const cyclingElementIds = ['label', 'sum-field', 'avg-field', 'stock-field']
 const fieldPhaseOffset = 0.18
 
-function fontStyleForField(i: number) {
+function fontOverrideForField(i: number) {
   const phase = (editorProgress.value + i * fieldPhaseOffset) % 1
-  const font = fonts[Math.floor(phase * fonts.length) % fonts.length]!
-  return {
-    fontFamily: font.family,
-    color: font.color,
-    fontStyle: font.fontStyle,
-    textDecoration: font.decoration
-  }
+  return fontStates[Math.floor(phase * fontStates.length) % fontStates.length]!
+}
+
+// The elements actually handed to TemplateCanvasElement — same positions as miniElements
+// (so dragging persists) with the cycling elements' font/color/style overridden per frame.
+const renderElements = computed<TemplateElement[]>(() =>
+  miniElements.map((el) => {
+    const cycleIndex = cyclingElementIds.indexOf(el.id)
+    if (cycleIndex === -1) return el
+    const override = fontOverrideForField(cycleIndex)
+    return { ...el, fontFamily: override.fontFamily, color: override.color, italic: override.italic, underline: override.underline }
+  })
+)
+
+// ---------- Mini canvas scale ----------
+// The wrapper's CSS locks its aspect-ratio to the page's own (see .mini-canvas-wrapper), so
+// unlike the real editor's computeCanvasScale (which fits an arbitrary-shaped panel) this only
+// ever needs a single width-based ratio — height always follows proportionally.
+const miniCanvasWrapperEl = ref<HTMLElement | null>(null)
+const miniScale = ref(340 / PAGE_WIDTH)
+let miniResizeObserver: ResizeObserver | null = null
+
+function updateMiniScale() {
+  const width = miniCanvasWrapperEl.value?.clientWidth
+  if (width) miniScale.value = width / PAGE_WIDTH
 }
 
 // ---------- Example templates ----------
@@ -187,11 +295,18 @@ function observeReveal(key: (typeof revealKeys)[number]) {
 onMounted(() => {
   window.addEventListener('scroll', requestScrollUpdate, { passive: true })
   onScroll()
+
+  updateMiniScale()
+  if (miniCanvasWrapperEl.value) {
+    miniResizeObserver = new ResizeObserver(updateMiniScale)
+    miniResizeObserver.observe(miniCanvasWrapperEl.value)
+  }
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('scroll', requestScrollUpdate)
   observer?.disconnect()
+  miniResizeObserver?.disconnect()
 })
 </script>
 
@@ -264,31 +379,43 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="editor-canvas-area">
-            <div class="editor-page" :style="editorPageStyle">
-              <div class="editor-zone" :class="{ 'is-active': editorStep === 0 }">
-                <div class="zone-bar-title" />
-                <div class="zone-bar-subtitle" />
-              </div>
+            <div ref="miniCanvasWrapperEl" class="mini-canvas-wrapper">
+              <div
+                class="mini-canvas"
+                :style="{
+                  width: `${PAGE_WIDTH}px`,
+                  height: `${PAGE_HEIGHT}px`,
+                  transform: `scale(${miniScale})`,
+                  background: pageGradients[editorStep]
+                }"
+              >
+                <div
+                  v-for="(rect, idx) in zoneHighlightRects"
+                  :key="idx"
+                  class="zone-highlight"
+                  :class="{ 'is-active': editorStep === idx }"
+                  :style="{ left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.width}px`, height: `${rect.height}px` }"
+                />
 
-              <div class="editor-zone" :class="{ 'is-active': editorStep === 1 }">
-                <div class="zone-row"><span>Wireless Mouse</span><span class="badge badge-danger">Low</span></div>
-                <div class="zone-row"><span>USB-C Cable</span><span class="badge badge-success">In stock</span></div>
-                <div class="zone-row"><span>HDMI Adapter</span><span class="badge badge-success">In stock</span></div>
-              </div>
+                <TemplateCanvasElement
+                  v-for="el in renderElements"
+                  :key="el.id"
+                  :element="el"
+                  :selected="false"
+                  :scale="miniScale"
+                  :report-context="sampleReportContext"
+                  :style="{ opacity: zoneOfElement(el.id) === editorStep ? 1 : 0.35, transition: 'opacity 0.4s ease' }"
+                  @move="(pos) => onElementMove(el.id, pos)"
+                />
 
-              <div class="editor-zone" :class="{ 'is-active': editorStep === 2 }">
-                <div class="font-fields">
-                  <span v-for="(field, i) in fontFields" :key="field" class="font-chip" :style="fontStyleForField(i)">{{ field }}</span>
+                <div class="mini-pages-thumbs" :class="{ 'is-active': editorStep === 3 }">
+                  <div class="pages-thumbs">
+                    <div class="page-thumb is-first" />
+                    <div class="page-thumb" />
+                    <div class="page-thumb" />
+                  </div>
+                  <div class="pages-caption">3 pages, one template</div>
                 </div>
-              </div>
-
-              <div class="editor-zone pages-zone" :class="{ 'is-active': editorStep === 3 }">
-                <div class="pages-thumbs">
-                  <div class="page-thumb is-first" />
-                  <div class="page-thumb" />
-                  <div class="page-thumb" />
-                </div>
-                <div class="pages-caption">3 pages, one template</div>
               </div>
             </div>
           </div>
@@ -615,73 +742,48 @@ onBeforeUnmount(() => {
     repeating-linear-gradient(90deg, transparent, transparent 27px, var(--color-border) 27px, var(--color-border) 28px);
   background-size: 28px 28px;
 }
-.editor-page {
+.mini-canvas-wrapper {
+  position: relative;
   width: 100%;
   max-width: 340px;
-  aspect-ratio: 8.5 / 11;
-  background: var(--color-bg);
+  aspect-ratio: 794 / 1123;
+  overflow: hidden;
   border: 1px solid var(--color-border-strong);
-  transition: background 0.5s ease;
   border-radius: 4px;
   box-shadow: var(--shadow-md);
-  padding: var(--space-5);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
 }
-.editor-zone {
+.mini-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: top left;
+  transition: background 0.5s ease;
+}
+.zone-highlight {
+  position: absolute;
   border-radius: 8px;
-  padding: var(--space-2);
-  opacity: 0.35;
-  box-shadow: 0 0 0 0 rgba(0, 0, 0, 0);
   background: transparent;
-  transition: opacity 0.4s ease, box-shadow 0.4s ease, background-color 0.4s ease;
+  box-shadow: 0 0 0 0 rgba(0, 0, 0, 0);
+  transition: background-color 0.4s ease, box-shadow 0.4s ease;
+  pointer-events: none;
 }
-.editor-zone.is-active {
-  opacity: 1;
-  box-shadow: 0 0 0 3px var(--color-primary);
+.zone-highlight.is-active {
   background: var(--color-primary-soft);
+  box-shadow: 0 0 0 3px var(--color-primary);
 }
-.zone-bar-title {
-  background: var(--color-text);
-  border-radius: 2px;
-  height: 14px;
-  width: 55%;
-  margin-bottom: 8px;
+.mini-pages-thumbs {
+  position: absolute;
+  left: 32px;
+  top: 940px;
+  padding: 8px;
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: 0 0 0 0 rgba(0, 0, 0, 0);
+  transition: background-color 0.4s ease, box-shadow 0.4s ease;
 }
-.zone-bar-subtitle {
-  background: var(--color-text-muted);
-  opacity: 0.5;
-  border-radius: 2px;
-  height: 8px;
-  width: 35%;
-}
-.zone-row {
-  display: flex;
-  justify-content: space-between;
-  font-size: 11px;
-  color: var(--color-text-muted);
-  margin-bottom: 6px;
-}
-.zone-row:last-child {
-  margin-bottom: 0;
-}
-.font-fields {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.font-chip {
-  font-size: var(--text-xs);
-  font-weight: 600;
-  padding: 3px 8px;
-  border-radius: 4px;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  transition: color 0.3s ease, font-style 0.3s ease;
-}
-.pages-zone {
-  margin-top: auto;
+.mini-pages-thumbs.is-active {
+  background: var(--color-primary-soft);
+  box-shadow: 0 0 0 3px var(--color-primary);
 }
 .pages-thumbs {
   display: flex;
