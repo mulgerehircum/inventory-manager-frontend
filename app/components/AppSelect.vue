@@ -88,6 +88,11 @@ function onClickOutside(event: MouseEvent) {
 
 onMounted(() => document.addEventListener('mousedown', onClickOutside))
 onBeforeUnmount(() => document.removeEventListener('mousedown', onClickOutside))
+
+// Lets a parent drive the dropdown open/closed programmatically — e.g. landing.vue's scripted
+// cursor demo, which opens/closes this same way a real click would rather than faking its own
+// popup.
+defineExpose({ open, close })
 </script>
 
 <template>

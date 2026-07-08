@@ -13,7 +13,7 @@ async function handleLogout() {
 <template>
   <div>
     <NuxtRouteAnnouncer />
-    <div class="top-bar">
+    <div v-if="route.path !== '/landing'" class="top-bar">
       <button v-if="route.path === '/'" class="theme-toggle-btn" @click="toggleTheme($event)">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
           <circle cx="12" cy="12" r="4" />

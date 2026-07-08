@@ -288,6 +288,10 @@ a {
   background: var(--color-primary-soft);
   color: var(--color-primary);
 }
+.badge-warning {
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
 
 .modal-overlay {
   position: fixed;
