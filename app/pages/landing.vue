@@ -174,7 +174,7 @@ function onElementMove(id: string, pos: { x: number; y: number }) {
 // A scripted mini-sequence scrubbed by how far scroll has moved through just step 0's own
 // quarter of the section (not wall-clock time), so it plays forward/backward with the user
 // exactly like everything else here rather than autoplaying once and being done.
-const STEP0_TITLE_TEXT = 'Low Stock Report'
+const STEP0_TITLE_TEXT = 'Business Invoice'
 const step0Progress = computed(() => {
   if (editorStep.value > 0) return 1
   if (editorStep.value < 0) return 0
@@ -211,7 +211,7 @@ const newFieldElement = computed<TemplateElement>(() => ({
   height: 30,
   fontSize: 16,
   bold: true,
-  content: 'Business Invoice',
+  content: 'INV-1042',
   color: colorChanged.value ? primaryHex.value : 'var(--color-text)',
   fontFamily: fontChanged.value ? 'Poppins' : undefined
 }))
