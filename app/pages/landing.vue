@@ -7,11 +7,12 @@ const { theme, toggleTheme } = useTheme()
 // relying on CSS to recolor a single asset.
 const logoSrc = computed(() => (theme.value === 'light' ? '/pdfloom-logo-light.svg' : '/pdfloom-logo.svg'))
 
-// Real curated font names (see google-fonts.ts on the backend) used by the font-cycling
-// mini-editor elements below — loaded once up front rather than per-scroll-tick, same
-// reasoning as templates/[id].vue's usedFontFamilies, just a fixed set since all three are
-// in play across the whole cycle regardless of current scroll position.
-const cyclingFontFamilies = ['Playfair Display', 'JetBrains Mono', 'Space Grotesk']
+// Real curated font names (see google-fonts.ts on the backend) used by the mini-editor demo
+// elements below (the font-cycling summary fields, plus Poppins for the step-0 storyboard's
+// font-change) — loaded once up front rather than per-scroll-tick, same reasoning as
+// templates/[id].vue's usedFontFamilies, just a fixed set since all four are in play at some
+// point regardless of current scroll position.
+const cyclingFontFamilies = ['Playfair Display', 'JetBrains Mono', 'Space Grotesk', 'Poppins']
 
 useHead({
   title: 'PDFloom — PDF Template Designer for Inventory Reports',
@@ -146,7 +147,7 @@ const miniElements = reactive<TemplateElement[]>([
 // independent of the elements array itself so dragging never disturbs which group a visitor
 // is being shown.
 const zoneElementIds = [
-  ['title', 'subtitle'],
+  ['title', 'subtitle', 'new-field'],
   ['table'],
   ['label', 'sum-field', 'avg-field', 'stock-field']
 ]
@@ -168,6 +169,60 @@ function onElementMove(id: string, pos: { x: number; y: number }) {
   el.x = Math.max(0, Math.min(PAGE_WIDTH - el.width, pos.x))
   el.y = Math.max(0, Math.min(PAGE_HEIGHT - el.height, pos.y))
 }
+
+// ---------- Step 0 storyboard: type the title, add a field, style it via the tooltip ----------
+// A scripted mini-sequence scrubbed by how far scroll has moved through just step 0's own
+// quarter of the section (not wall-clock time), so it plays forward/backward with the user
+// exactly like everything else here rather than autoplaying once and being done.
+const STEP0_TITLE_TEXT = 'Low Stock Report'
+const step0Progress = computed(() => {
+  if (editorStep.value > 0) return 1
+  if (editorStep.value < 0) return 0
+  return Math.max(0, Math.min(1, editorProgress.value / 0.25))
+})
+
+const titleTypedText = computed(() => {
+  const typingProgress = Math.max(0, Math.min(1, step0Progress.value / 0.4))
+  const count = Math.round(typingProgress * STEP0_TITLE_TEXT.length)
+  const typed = STEP0_TITLE_TEXT.slice(0, count)
+  return count < STEP0_TITLE_TEXT.length ? `${typed}|` : typed
+})
+
+const showNewField = computed(() => step0Progress.value > 0.4)
+const showTooltip = computed(() => step0Progress.value > 0.6)
+const colorChanged = computed(() => step0Progress.value > 0.75)
+const fontChanged = computed(() => step0Progress.value > 0.88)
+
+const primaryHex = computed(() => (theme.value === 'light' ? '#0f7d70' : '#2bb4a8'))
+
+// Draggable like the rest of the elements, once it exists — kept as its own small ref rather
+// than living in miniElements since it doesn't exist at all until the storyboard adds it.
+const newFieldPos = reactive({ x: 380, y: 48 })
+function onNewFieldMove(pos: { x: number; y: number }) {
+  newFieldPos.x = Math.max(0, Math.min(PAGE_WIDTH - 200, pos.x))
+  newFieldPos.y = Math.max(0, Math.min(PAGE_HEIGHT - 30, pos.y))
+}
+const newFieldElement = computed<TemplateElement>(() => ({
+  id: 'new-field',
+  type: 'text',
+  x: newFieldPos.x,
+  y: newFieldPos.y,
+  width: 200,
+  height: 30,
+  fontSize: 16,
+  bold: true,
+  content: 'Business Invoice',
+  color: colorChanged.value ? primaryHex.value : 'var(--color-text)',
+  fontFamily: fontChanged.value ? 'Poppins' : undefined
+}))
+const newFieldOpacity = computed(() => (!showNewField.value ? 0 : zoneOfElement('new-field') === editorStep.value ? 1 : 0.35))
+
+const tooltipFontOptions = [
+  { value: '', label: 'Default' },
+  { value: 'Poppins', label: 'Poppins' }
+]
+const tooltipFontValue = computed(() => (fontChanged.value ? 'Poppins' : ''))
+const tooltipColorValue = computed(() => (colorChanged.value ? primaryHex.value : undefined))
 
 // ---------- Gradient background, driven by the pinned section's overall scroll progress ----------
 // One preset per editor step (same 4-way granularity as the rest of the mockup) rather than a
@@ -201,9 +256,11 @@ function fontOverrideForField(i: number) {
 }
 
 // The elements actually handed to TemplateCanvasElement — same positions as miniElements
-// (so dragging persists) with the cycling elements' font/color/style overridden per frame.
+// (so dragging persists) with the cycling elements' font/color/style overridden per frame,
+// and the title's content swapped for the step-0 storyboard's typewriter text.
 const renderElements = computed<TemplateElement[]>(() =>
   miniElements.map((el) => {
+    if (el.id === 'title') return { ...el, content: titleTypedText.value }
     const cycleIndex = cyclingElementIds.indexOf(el.id)
     if (cycleIndex === -1) return el
     const override = fontOverrideForField(cycleIndex)
@@ -408,6 +465,22 @@ onBeforeUnmount(() => {
                   @move="(pos) => onElementMove(el.id, pos)"
                 />
 
+                <!-- Step-0 storyboard: appears once the title has finished typing (see
+                     showNewField), demonstrating "adding a text field" mid-scroll. -->
+                <TemplateCanvasElement
+                  :element="newFieldElement"
+                  :selected="false"
+                  :scale="miniScale"
+                  :report-context="sampleReportContext"
+                  :style="{
+                    opacity: newFieldOpacity,
+                    transform: showNewField ? 'scale(1)' : 'scale(0.85)',
+                    transformOrigin: 'top left',
+                    transition: 'opacity 0.4s ease, transform 0.4s ease, color 0.3s ease'
+                  }"
+                  @move="onNewFieldMove"
+                />
+
                 <div class="mini-pages-thumbs" :class="{ 'is-active': editorStep === 3 }">
                   <div class="pages-thumbs">
                     <div class="page-thumb is-first" />
@@ -415,6 +488,22 @@ onBeforeUnmount(() => {
                     <div class="page-thumb" />
                   </div>
                   <div class="pages-caption">3 pages, one template</div>
+                </div>
+              </div>
+
+              <!-- Rendered outside the scaled canvas so its controls stay at a legible,
+                   natural size regardless of the mockup's shrink factor. -->
+              <div class="mini-tooltip" :class="{ 'is-visible': showTooltip }">
+                <div class="mini-tooltip-header">
+                  <span class="mini-tooltip-badge">text</span>
+                </div>
+                <div class="mini-tooltip-row">
+                  <span class="mini-tooltip-row-label">Font</span>
+                  <AppSelect class="mini-tooltip-select" :model-value="tooltipFontValue" :options="tooltipFontOptions" />
+                </div>
+                <div class="mini-tooltip-row">
+                  <span class="mini-tooltip-row-label">Text</span>
+                  <AppColorInput :model-value="tooltipColorValue" placeholder="default" />
                 </div>
               </div>
             </div>
@@ -784,6 +873,61 @@ onBeforeUnmount(() => {
 .mini-pages-thumbs.is-active {
   background: var(--color-primary-soft);
   box-shadow: 0 0 0 3px var(--color-primary);
+}
+.mini-tooltip {
+  position: absolute;
+  left: 40%;
+  top: 8%;
+  width: 130px;
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  opacity: 0;
+  transform: translateY(6px) scale(0.95);
+  transition: opacity 0.35s ease, transform 0.35s ease;
+  /* Decorative — a scripted preview of the tooltip, not a real control surface, so clicks
+     shouldn't land on it (or the mockup underneath) at all. */
+  pointer-events: none;
+  z-index: 5;
+}
+.mini-tooltip.is-visible {
+  opacity: 1;
+  transform: none;
+}
+.mini-tooltip-header {
+  margin-bottom: var(--space-2);
+}
+.mini-tooltip-badge {
+  display: inline-flex;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.mini-tooltip-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+.mini-tooltip-row:last-child {
+  margin-bottom: 0;
+}
+.mini-tooltip-row-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+.mini-tooltip-select {
+  font-size: 11px;
+  min-width: 0;
 }
 .pages-thumbs {
   display: flex;
