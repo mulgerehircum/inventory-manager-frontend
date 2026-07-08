@@ -79,22 +79,42 @@ function scrollToStep(idx: number) {
   window.scrollTo({ top: targetScrollY, behavior: prefersReduced ? 'auto' : 'smooth' })
 }
 
-// ---------- Font swatches ----------
+// ---------- Gradient background, driven by the pinned section's overall scroll progress ----------
+// One preset per editor step (same 4-way granularity as the rest of the mockup) rather than a
+// continuously-interpolated gradient — CSS can't smoothly tween between two arbitrary gradients,
+// so snapping in step with everything else it already snaps with (nav/toolbar/zone) reads as
+// intentional instead of janky. Stays within the app's own background/soft tones (never a
+// saturated hue) so zone text sitting on top never loses contrast.
+const pageGradients = [
+  'linear-gradient(135deg, var(--color-bg) 0%, var(--color-bg) 100%)',
+  'linear-gradient(135deg, var(--color-bg) 30%, var(--color-primary-soft) 100%)',
+  'linear-gradient(50deg, var(--color-primary-soft) 0%, var(--color-bg) 55%, var(--color-primary-soft) 100%)',
+  'linear-gradient(200deg, var(--color-bg) 0%, var(--color-surface) 60%, var(--color-bg) 100%)'
+]
+const editorPageStyle = computed(() => ({ background: pageGradients[editorStep.value] }))
+
+// ---------- Font-cycling fields ----------
+// Several small "elements" that each cycle through the same font presets as scroll advances,
+// phase-shifted per field so they cascade instead of flipping in lockstep — demonstrates
+// per-element font choice more vividly than one line a visitor has to click to see change.
 const fonts = [
   { family: 'Georgia, serif', color: 'var(--color-text)', fontStyle: 'normal', decoration: 'none' },
   { family: "'Courier New', monospace", color: 'var(--color-primary)', fontStyle: 'normal', decoration: 'none' },
   { family: 'var(--font-sans)', color: 'var(--color-danger)', fontStyle: 'italic', decoration: 'underline' }
 ]
-const selectedFont = ref(0)
-const fontPreviewStyle = computed(() => {
-  const font = fonts[selectedFont.value]!
+const fontFields = ['Product', 'SKU-1042', '$24.99', '8 in stock']
+const fieldPhaseOffset = 0.18
+
+function fontStyleForField(i: number) {
+  const phase = (editorProgress.value + i * fieldPhaseOffset) % 1
+  const font = fonts[Math.floor(phase * fonts.length) % fonts.length]!
   return {
     fontFamily: font.family,
     color: font.color,
     fontStyle: font.fontStyle,
     textDecoration: font.decoration
   }
-})
+}
 
 // ---------- Example templates ----------
 const templates = [
@@ -244,7 +264,7 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="editor-canvas-area">
-            <div class="editor-page">
+            <div class="editor-page" :style="editorPageStyle">
               <div class="editor-zone" :class="{ 'is-active': editorStep === 0 }">
                 <div class="zone-bar-title" />
                 <div class="zone-bar-subtitle" />
@@ -257,33 +277,9 @@ onBeforeUnmount(() => {
               </div>
 
               <div class="editor-zone" :class="{ 'is-active': editorStep === 2 }">
-                <div class="font-swatches">
-                  <button
-                    class="font-swatch font-swatch-serif"
-                    :class="{ 'is-selected': selectedFont === 0 }"
-                    type="button"
-                    @click="selectedFont = 0"
-                  >
-                    Aa
-                  </button>
-                  <button
-                    class="font-swatch font-swatch-mono"
-                    :class="{ 'is-selected': selectedFont === 1 }"
-                    type="button"
-                    @click="selectedFont = 1"
-                  >
-                    Aa
-                  </button>
-                  <button
-                    class="font-swatch font-swatch-italic"
-                    :class="{ 'is-selected': selectedFont === 2 }"
-                    type="button"
-                    @click="selectedFont = 2"
-                  >
-                    Aa
-                  </button>
+                <div class="font-fields">
+                  <span v-for="(field, i) in fontFields" :key="field" class="font-chip" :style="fontStyleForField(i)">{{ field }}</span>
                 </div>
-                <div class="font-preview" :style="fontPreviewStyle">Wireless Mouse — 42 in stock</div>
               </div>
 
               <div class="editor-zone pages-zone" :class="{ 'is-active': editorStep === 3 }">
@@ -625,6 +621,7 @@ onBeforeUnmount(() => {
   aspect-ratio: 8.5 / 11;
   background: var(--color-bg);
   border: 1px solid var(--color-border-strong);
+  transition: background 0.5s ease;
   border-radius: 4px;
   box-shadow: var(--shadow-md);
   padding: var(--space-5);
@@ -669,43 +666,19 @@ onBeforeUnmount(() => {
 .zone-row:last-child {
   margin-bottom: 0;
 }
-.font-swatches {
+.font-fields {
   display: flex;
-  gap: 10px;
-  margin-bottom: 8px;
+  flex-wrap: wrap;
+  gap: 6px;
 }
-.font-swatch {
-  cursor: pointer;
-  font-size: var(--text-lg);
-  font-weight: 700;
-  padding: 2px 6px;
-  border-radius: 6px;
-  box-shadow: 0 0 0 0 rgba(0, 0, 0, 0);
-  transition: box-shadow 0.2s ease;
-  background: none;
-  border: none;
-}
-.font-swatch.is-selected {
-  box-shadow: 0 0 0 2px var(--color-primary);
-}
-.font-swatch-serif {
-  font-family: Georgia, serif;
-  color: var(--color-text);
-}
-.font-swatch-mono {
-  font-family: 'Courier New', monospace;
-  color: var(--color-primary);
-}
-.font-swatch-italic {
-  font-family: var(--font-sans);
-  font-style: italic;
-  text-decoration: underline;
-  color: var(--color-danger);
-}
-.font-preview {
-  font-size: var(--text-sm);
+.font-chip {
+  font-size: var(--text-xs);
   font-weight: 600;
-  transition: color 0.2s ease;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  transition: color 0.3s ease, font-style 0.3s ease;
 }
 .pages-zone {
   margin-top: auto;
