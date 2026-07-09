@@ -1,4 +1,23 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1560 1170" fill="none">
+  <style>
+    #big-wheel {
+      transform-origin: 355px 480px;
+      animation: big-wheel-spin 6s linear infinite;
+    }
+    #star-wheel {
+      transform-origin: 490px 780px;
+      animation: star-wheel-spin 4s linear infinite;
+    }
+    @keyframes big-wheel-spin {
+      to { transform: rotate(360deg); }
+    }
+    @keyframes star-wheel-spin {
+      to { transform: rotate(-360deg); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      #big-wheel, #star-wheel { animation: none; }
+    }
+  </style>
   <rect width="1560" height="1170" fill="#f3f8f7"/>
 
   <!-- thread lines (drawn first, so wheel/hub/text sit on top) -->
@@ -8,45 +27,49 @@
     <line x1="500" y1="780" x2="665" y2="690"/>
   </g>
 
-  <!-- big wheel -->
-  <circle cx="355" cy="480" r="275" stroke="#16221f" stroke-width="26"/>
-  <g stroke="#5c716d" stroke-width="9" stroke-linecap="round">
-    <line x1="355" y1="480" x2="355" y2="215"/>
-    <line x1="355" y1="480" x2="500" y2="240"/>
-    <line x1="355" y1="480" x2="592" y2="365"/>
-    <line x1="355" y1="480" x2="625" y2="480"/>
-    <line x1="355" y1="480" x2="592" y2="595"/>
-    <line x1="355" y1="480" x2="500" y2="720"/>
-    <line x1="355" y1="480" x2="355" y2="745"/>
-    <line x1="355" y1="480" x2="210" y2="720"/>
-    <line x1="355" y1="480" x2="118" y2="595"/>
-    <line x1="355" y1="480" x2="85" y2="480"/>
-    <line x1="355" y1="480" x2="118" y2="365"/>
-    <line x1="355" y1="480" x2="210" y2="240"/>
+  <!-- big wheel (rim + spokes + hub spin together as one unit around their shared center) -->
+  <g id="big-wheel">
+    <circle cx="355" cy="480" r="275" stroke="#16221f" stroke-width="26"/>
+    <g stroke="#5c716d" stroke-width="9" stroke-linecap="round">
+      <line x1="355" y1="480" x2="355" y2="215"/>
+      <line x1="355" y1="480" x2="500" y2="240"/>
+      <line x1="355" y1="480" x2="592" y2="365"/>
+      <line x1="355" y1="480" x2="625" y2="480"/>
+      <line x1="355" y1="480" x2="592" y2="595"/>
+      <line x1="355" y1="480" x2="500" y2="720"/>
+      <line x1="355" y1="480" x2="355" y2="745"/>
+      <line x1="355" y1="480" x2="210" y2="720"/>
+      <line x1="355" y1="480" x2="118" y2="595"/>
+      <line x1="355" y1="480" x2="85" y2="480"/>
+      <line x1="355" y1="480" x2="118" y2="365"/>
+      <line x1="355" y1="480" x2="210" y2="240"/>
+    </g>
+    <circle cx="355" cy="480" r="32" fill="#16221f"/>
+    <circle cx="355" cy="480" r="20" fill="#f3f8f7"/>
+    <circle cx="355" cy="480" r="12" fill="#0f7d70"/>
   </g>
-  <circle cx="355" cy="480" r="32" fill="#16221f"/>
-  <circle cx="355" cy="480" r="20" fill="#f3f8f7"/>
-  <circle cx="355" cy="480" r="12" fill="#0f7d70"/>
 
   <!-- post from big wheel hub down to base -->
   <line x1="355" y1="510" x2="345" y2="775" stroke="#26332f" stroke-width="16" stroke-linecap="round"/>
 
-  <!-- small starburst wheel -->
-  <g stroke="#5c716d" stroke-width="5" stroke-linecap="round">
-    <line x1="490" y1="780" x2="490" y2="675"/>
-    <line x1="490" y1="780" x2="565" y2="700"/>
-    <line x1="490" y1="780" x2="595" y2="750"/>
-    <line x1="490" y1="780" x2="595" y2="810"/>
-    <line x1="490" y1="780" x2="565" y2="860"/>
-    <line x1="490" y1="780" x2="490" y2="885"/>
-    <line x1="490" y1="780" x2="415" y2="860"/>
-    <line x1="490" y1="780" x2="385" y2="810"/>
-    <line x1="490" y1="780" x2="385" y2="750"/>
-    <line x1="490" y1="780" x2="415" y2="700"/>
+  <!-- small starburst wheel (spins counter-clockwise, opposite the big wheel) -->
+  <g id="star-wheel">
+    <g stroke="#5c716d" stroke-width="5" stroke-linecap="round">
+      <line x1="490" y1="780" x2="490" y2="675"/>
+      <line x1="490" y1="780" x2="565" y2="700"/>
+      <line x1="490" y1="780" x2="595" y2="750"/>
+      <line x1="490" y1="780" x2="595" y2="810"/>
+      <line x1="490" y1="780" x2="565" y2="860"/>
+      <line x1="490" y1="780" x2="490" y2="885"/>
+      <line x1="490" y1="780" x2="415" y2="860"/>
+      <line x1="490" y1="780" x2="385" y2="810"/>
+      <line x1="490" y1="780" x2="385" y2="750"/>
+      <line x1="490" y1="780" x2="415" y2="700"/>
+    </g>
+    <circle cx="490" cy="780" r="20" fill="#16221f"/>
+    <circle cx="490" cy="780" r="12" fill="#f3f8f7"/>
+    <circle cx="490" cy="780" r="7" fill="#0f7d70"/>
   </g>
-  <circle cx="490" cy="780" r="20" fill="#16221f"/>
-  <circle cx="490" cy="780" r="12" fill="#f3f8f7"/>
-  <circle cx="490" cy="780" r="7" fill="#0f7d70"/>
 
   <!-- base plank -->
   <polygon points="300,780 1160,722 1160,748 300,806" fill="#16221f" fill-opacity="0.08" stroke="#b7d0cd" stroke-width="3"/>
