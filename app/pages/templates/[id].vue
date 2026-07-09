@@ -1091,7 +1091,7 @@ async function handleSave() {
         <p v-if="imageUploadError" class="error-text">{{ imageUploadError }}</p>
       </aside>
 
-      <div ref="canvasWrapperEl" class="canvas-wrapper" :style="{ width: `${PAGE_WIDTH + CANVAS_GUTTER * 2}px` }">
+      <div ref="canvasWrapperEl" class="canvas-wrapper">
         <div class="canvas-scale-box" :style="{ width: `${PAGE_WIDTH * canvasScale}px`, height: `${PAGE_HEIGHT * canvasScale}px` }">
           <div
             class="canvas"
@@ -1474,7 +1474,7 @@ async function handleSave() {
         </div>
       </div>
 
-      <aside class="preview card" :style="{ width: `${PAGE_WIDTH + CANVAS_GUTTER * 2}px` }">
+      <aside class="preview card">
         <p v-if="previewError" class="error-text preview-message">{{ previewError }}</p>
         <p v-else-if="!hasRenderedPreview" class="hint-text preview-message">Add an element to see a PDF preview here.</p>
         <div ref="previewWrapperEl" class="preview-canvas-scroll" v-show="!previewError && hasRenderedPreview">
@@ -2087,9 +2087,7 @@ async function handleSave() {
   gap: var(--space-4);
   align-items: flex-start;
   overflow-x: auto;
-  width: fit-content;
-  max-width: 100%;
-  margin: 0 auto;
+  width: 100%;
 }
 .palette-group-label {
   margin: var(--space-2) 0 0;
@@ -2135,7 +2133,11 @@ async function handleSave() {
   color: var(--color-primary);
 }
 .preview {
-  flex-shrink: 0;
+  /* flex/min-width mirror .canvas-wrapper's — both panels render the same PAGE_WIDTH x
+     PAGE_HEIGHT page, so giving them equal flex-grow keeps them shrinking together at
+     roughly the same scale instead of one reserving full width while the other shrinks. */
+  flex: 1 1 0%;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
@@ -2156,8 +2158,16 @@ async function handleSave() {
 .canvas-wrapper {
   /* Structural sizing (padding: 24px matches the CANVAS_GUTTER constant used in
      canvasScale's math, height: 80vh matches .preview) — do not change these. Only
-     cosmetic properties (border color, radius, shadow) are safe to restyle here. */
-  flex-shrink: 0;
+     cosmetic properties (border color, radius, shadow) are safe to restyle here.
+
+     flex/min-width let this fill whatever room is actually left over in .workspace
+     (rather than always reserving the full unscaled page width) so it doesn't force
+     a horizontal scrollbar on wide-but-not-wide-enough viewports. Its width is never
+     derived from canvasScale (that would feed back into the ResizeObserver below and
+     never settle — verified this the hard way) — it's purely flex-distributed space,
+     so canvasScale.value's widthScale term now reflects genuinely available room. */
+  flex: 1 1 0%;
+  min-width: 0;
   display: flex;
   justify-content: center;
   align-items: center;
