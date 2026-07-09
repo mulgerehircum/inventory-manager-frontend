@@ -54,6 +54,23 @@ const prefersReduced = typeof window !== 'undefined' && window.matchMedia('(pref
 
 // ---------- Header shadow-on-scroll ----------
 const scrolled = ref(false)
+
+// ---------- Mobile nav menu (< 900px) ----------
+const mobileMenuOpen = ref(false)
+const MOBILE_BREAKPOINT = 900
+// Starts false (desktop-safe default) rather than reading window.innerWidth eagerly here —
+// this runs during SSR too, where there's no window, and eagerly reading the real client
+// viewport would desync from the SSR-rendered markup and trigger a hydration mismatch. Gets
+// corrected to the real value once onMounted's onWindowResize() call fires, client-only.
+const isMobileViewport = ref(false)
+function onWindowResize() {
+  isMobileViewport.value = window.innerWidth < MOBILE_BREAKPOINT
+  // Auto-closes if the viewport crosses back to desktop width while open, rather than leaving
+  // a stale open panel that only a phone-width layout was ever meant to show.
+  if (!isMobileViewport.value && mobileMenuOpen.value) {
+    mobileMenuOpen.value = false
+  }
+}
 // True once the editor section's own top has reached the viewport top — i.e. we've scrolled
 // past the hero into the pinned demo — so the large hero-sized logo can shrink back to a
 // normal compact nav-bar mark rather than eating space in the sticky header for the rest of
@@ -647,11 +664,14 @@ function observeReveal(key: (typeof revealKeys)[number]) {
 
 onMounted(() => {
   window.addEventListener('scroll', requestScrollUpdate, { passive: true })
+  window.addEventListener('resize', onWindowResize, { passive: true })
   onScroll()
+  onWindowResize()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('scroll', requestScrollUpdate)
+  window.removeEventListener('resize', onWindowResize)
   observer?.disconnect()
 })
 </script>
@@ -659,12 +679,36 @@ onBeforeUnmount(() => {
 <template>
   <div class="landing">
     <header class="landing-header" :class="{ scrolled }">
-      <NuxtLink to="/" class="brand">
-        <img :src="logoSrc" alt="PDFloom" class="brand-logo" :class="{ 'is-compact': inEditorSection }" />
-      </NuxtLink>
-      <div class="header-actions">
-        <NuxtLink to="/login" class="signin-link">Sign in</NuxtLink>
-        <button class="theme-toggle" type="button" @click="toggleTheme($event)">
+      <div class="landing-header-row">
+        <NuxtLink to="/" class="brand">
+          <img :src="logoSrc" alt="PDFloom" class="brand-logo" :class="{ 'is-compact': inEditorSection }" />
+        </NuxtLink>
+        <div class="header-actions">
+          <NuxtLink to="/login" class="signin-link">Sign in</NuxtLink>
+          <button class="theme-toggle" type="button" @click="toggleTheme($event)">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+            </svg>
+            {{ theme === 'dark' ? 'Light' : 'Dark' }}
+          </button>
+        </div>
+        <button
+          class="mobile-menu-toggle"
+          type="button"
+          :class="{ 'is-open': mobileMenuOpen }"
+          :aria-expanded="mobileMenuOpen"
+          aria-label="Toggle menu"
+          @click="mobileMenuOpen = !mobileMenuOpen"
+        >
+          <span class="mobile-menu-bar" />
+          <span class="mobile-menu-bar" />
+          <span class="mobile-menu-bar" />
+        </button>
+      </div>
+      <div class="mobile-menu-panel" :class="{ 'is-open': mobileMenuOpen }">
+        <NuxtLink to="/login" class="signin-link" @click="mobileMenuOpen = false">Sign in</NuxtLink>
+        <button class="theme-toggle" type="button" @click="toggleTheme($event); mobileMenuOpen = false">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
             <circle cx="12" cy="12" r="4" />
             <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
@@ -708,7 +752,10 @@ onBeforeUnmount(() => {
         <div class="editor-nav">
           <div class="editor-nav-eyebrow">The editor</div>
           <div class="editor-nav-list">
-            <div class="editor-nav-progress" :style="{ height: editorProgress * 100 + '%' }" />
+            <div
+              class="editor-nav-progress"
+              :style="isMobileViewport ? { width: editorProgress * 100 + '%' } : { height: editorProgress * 100 + '%' }"
+            />
 
             <button
               v-for="(step, idx) in navSteps"
@@ -929,9 +976,6 @@ onBeforeUnmount(() => {
 
 /* ---------- Header ---------- */
 .landing-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
   max-width: 1360px;
   margin: 0 auto;
   padding: var(--space-4) var(--space-5);
@@ -946,6 +990,59 @@ onBeforeUnmount(() => {
   box-shadow: 0 1px 0 var(--color-border), 0 10px 30px rgba(0, 0, 0, 0.12);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
+}
+.landing-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+/* Hidden on desktop — the inline .header-actions group is what shows instead (see the
+   max-width:900px media query at the bottom of this file). */
+.mobile-menu-toggle {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+}
+.mobile-menu-bar {
+  width: 18px;
+  height: 2px;
+  background: var(--color-text);
+  border-radius: 1px;
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+.mobile-menu-toggle.is-open .mobile-menu-bar:nth-child(1) {
+  transform: translateY(6px) rotate(45deg);
+}
+.mobile-menu-toggle.is-open .mobile-menu-bar:nth-child(2) {
+  opacity: 0;
+}
+.mobile-menu-toggle.is-open .mobile-menu-bar:nth-child(3) {
+  transform: translateY(-6px) rotate(-45deg);
+}
+.mobile-menu-panel {
+  overflow: hidden;
+  max-height: 0;
+  opacity: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  transition: max-height 0.25s ease, opacity 0.25s ease;
+}
+.mobile-menu-panel.is-open {
+  max-height: 160px;
+  opacity: 1;
+  margin-top: var(--space-4);
 }
 .brand {
   display: flex;
@@ -1735,7 +1832,20 @@ onBeforeUnmount(() => {
   font-size: var(--text-xs);
 }
 
-@media (max-width: 860px) {
+@media (max-width: 900px) {
+  /* ---------- Nav: hamburger replaces the inline sign-in/theme-toggle group ---------- */
+  .header-actions {
+    display: none;
+  }
+  .mobile-menu-toggle {
+    display: flex;
+  }
+
+  /* Hero needs no mobile-specific stacking rule here — .hero is already a centered flex
+     column at every viewport width (it has no row-layout content to un-row on mobile, since
+     the handoff's mark-icon-beside-headline treatment is out of scope for this pass). */
+
+  /* ---------- Scroll-pinned editor demo ---------- */
   .editor-sticky {
     flex-direction: column;
     align-items: stretch;
@@ -1746,17 +1856,31 @@ onBeforeUnmount(() => {
     flex: none;
   }
   .editor-nav-list {
-    flex-direction: row;
-    flex-wrap: wrap;
-    gap: var(--space-4);
+    flex-direction: column;
     border-left: none;
     padding-left: 0;
   }
+  /* Horizontal bar above the (single, current) step instead of a vertical track beside all
+     of them — the template already switches its bound style from height% to width% at this
+     same breakpoint (see isMobileViewport), this just repositions/resizes the element itself. */
   .editor-nav-progress {
+    position: static;
+    width: 0%;
+    height: 3px;
+    margin-bottom: var(--space-3);
+    transition: width 0.08s linear;
+  }
+  /* Only the current step shows on mobile — swapped instantly as scroll crosses each
+     threshold (a plain class toggle, not an animated transition), matching how the desktop
+     nav's own active/inactive state changes are likewise instant, not eased. */
+  .editor-nav-item {
     display: none;
   }
+  .editor-nav-item.is-active {
+    display: block;
+  }
   .editor-mockup {
-    height: min(480px, 52vh);
+    height: min(360px, 46vh);
   }
 }
 
